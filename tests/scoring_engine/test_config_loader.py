@@ -28,6 +28,17 @@ class TestConfigLoader(object):
     def test_worker_refresh_time(self):
         assert self.config.worker_refresh_time == 30
 
+    def test_max_consecutive_round_failures_default(self):
+        # Not set in the test config file, so the built-in default applies
+        assert self.config.max_consecutive_round_failures == 3
+
+    def test_max_consecutive_round_failures_from_environment(self):
+        os.environ["SCORINGENGINE_MAX_CONSECUTIVE_ROUND_FAILURES"] = "7"
+        try:
+            assert ConfigLoader(location="../tests/scoring_engine/engine.conf.inc").max_consecutive_round_failures == 7
+        finally:
+            del os.environ["SCORINGENGINE_MAX_CONSECUTIVE_ROUND_FAILURES"]
+
     def test_blue_team_update_hostname(self):
         assert self.config.blue_team_update_hostname is True
 

@@ -4,6 +4,13 @@ target_round_time = 180
 agent_psk = TheCakeIsALie
 agent_show_flag_early_mins = 5
 worker_refresh_time = 30
+# How many rounds may fail back to back before the engine gives up and exits
+# non-zero.  A failed round (usually a database blip) is rolled back and
+# retried, but an error that reproduces every round is not transient: the
+# engine exits so the container restart is visible to the operator instead of
+# it silently spinning through the competition producing no rounds.
+# Set to 0 to retry forever (not recommended).
+max_consecutive_round_failures = 3
 engine_paused = False
 pause_duration = 30
 blue_team_update_hostname = True
