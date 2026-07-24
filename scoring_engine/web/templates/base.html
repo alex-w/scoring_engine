@@ -13,7 +13,20 @@
   <meta charset="utf-8">
   <meta http-equiv="X-UA-Compatible" content="IE=edge">
   <meta name="viewport" content="width=device-width, initial-scale=1">
+  {# Only mint a CSRF token for signed-in visitors.
+     Rendering csrf_token() unconditionally writes to the session, which gives
+     every anonymous visitor a session cookie.  A non-empty anonymous session
+     trips Flask-Login's "strong" session protection on every subsequent
+     request, which in turn hangs a remember-token-deleting Set-Cookie on every
+     response -- including the public scoreboard, the highest-traffic and most
+     cacheable page in the app.
+     Nothing anonymous is state changing: the public pages (welcome,
+     scoreboard, overview, about, announcements, notifications) only issue GET
+     requests, and the one anonymous form -- login -- carries its own token via
+     the FlaskForm ``form.csrf_token`` field, independent of this tag. #}
+  {% if current_user.is_authenticated %}
   <meta name="csrf-token" content="{{ csrf_token() }}">
+  {% endif %}
   {% block head %}
   <title>Scoring Engine - {% block title %}{% endblock %}</title>
   <script src="{{ url_for('static', filename='vendor/js/jquery.min.js') }}"></script>
@@ -29,14 +42,20 @@
     // $.ajaxSetup({beforeSend}) because a per-call beforeSend would silently
     // override ajaxSetup and strip the header.
     //
+    // The meta tag is only rendered for signed-in visitors (see above), so the
+    // token is the empty string on anonymous pages.  Those pages only issue
+    // GET requests, and sending an empty header would be worse than sending
+    // none, so the hook stays quiet when there is no token.
+    //
     // This lives at the end of the head block (rather than after it) so that
     // child templates that pull the block in via super() get the hook
     // installed before any script they add of their own.
-    window.CSRF_TOKEN = document.querySelector('meta[name="csrf-token"]').getAttribute('content');
     (function () {
+      var meta = document.querySelector('meta[name="csrf-token"]');
+      window.CSRF_TOKEN = meta ? meta.getAttribute('content') : '';
       var SAFE = /^(GET|HEAD|OPTIONS|TRACE)$/i;
       $(document).ajaxSend(function (event, jqxhr, settings) {
-        if (!SAFE.test(settings.type || 'GET') && !settings.crossDomain) {
+        if (window.CSRF_TOKEN && !SAFE.test(settings.type || 'GET') && !settings.crossDomain) {
           jqxhr.setRequestHeader('X-CSRFToken', window.CSRF_TOKEN);
         }
       });

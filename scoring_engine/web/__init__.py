@@ -1,15 +1,15 @@
 import logging
 import os
 
-from flask import Flask, jsonify, request
-from flask_login import LoginManager
+from flask import Flask, flash, jsonify, redirect, url_for
+from flask_login import LoginManager, current_user
 from flask_wtf.csrf import CSRFError
 
 from scoring_engine.cache import agent_cache, cache
 from scoring_engine.config import config
 from scoring_engine.db import db
 from scoring_engine.version import version_info
-from scoring_engine.web.csrf import csrf
+from scoring_engine.web.csrf import csrf, form_retry_target, is_browser_form_submission
 
 SECRET_KEY = os.urandom(128)
 
@@ -132,15 +132,34 @@ def create_app():
 
     @app.errorhandler(CSRFError)
     def handle_csrf_error(error):
-        """Return a JSON body for the API, plain text elsewhere.
+        """Answer a rejected request in the format its client can actually use.
 
-        Almost every state-changing route in this app is an XHR against
-        /api/..., and those callers parse JSON.  Returning the stock HTML error
-        page there produces a confusing "unexpected token <" in the console.
+        Two very different clients hit this handler:
+
+        * Scripted callers (jQuery ``$.ajax``, Dropzone, anything posting JSON)
+          parse the body as JSON.  Handing them the stock HTML error page
+          produces a baffling "unexpected token <" in the console, so they get
+          a 400 with a JSON body.
+
+        * A browser submitting a native ``<form method="POST">`` can only
+          render HTML.  Before CSRF protection existed, a stale token on
+          ``/login`` just re-rendered the sign-in form -- a scoreboard tab left
+          open for hours cost the user one extra click.  A 400 error document
+          would turn that into a dead end with no way forward, which during a
+          competition is a support ticket per person.  So we flash an
+          explanation and bounce them back to the page the form lives on, which
+          re-renders it with a token minted from the current session.
+
+        ``is_browser_form_submission`` decides between the two on request
+        headers rather than on the ``/api/`` path prefix, because the admin and
+        profile screens submit native forms *to* ``/api/`` endpoints -- see the
+        docstring there for the full reasoning.
         """
-        if request.path.startswith("/api/"):
-            return jsonify({"status": "error", "error": "CSRF validation failed", "reason": error.description}), 400
-        return error.description, 400
+        if is_browser_form_submission():
+            flash("Your session expired before that form was submitted. Please try again.", "danger")
+            fallback = url_for("welcome.home") if current_user.is_authenticated else url_for("auth.login")
+            return redirect(form_retry_target(fallback))
+        return jsonify({"status": "error", "error": "CSRF validation failed", "reason": error.description}), 400
 
     @app.context_processor
     def inject_version():
