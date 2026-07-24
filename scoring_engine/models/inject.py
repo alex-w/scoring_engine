@@ -1,7 +1,7 @@
 from datetime import datetime, timezone
 
 import pytz
-from sqlalchemy import Column, DateTime, ForeignKey, Integer, String, Text, Unicode, UnicodeText
+from sqlalchemy import Column, DateTime, ForeignKey, Index, Integer, String, Text, Unicode, UnicodeText
 from sqlalchemy.orm import relationship
 from sqlalchemy.sql.sqltypes import Boolean
 
@@ -99,6 +99,10 @@ class RubricItem(Base):
 
 class Inject(Base):
     __tablename__ = "inject"
+    # Team.current_inject_score filters WHERE team_id = ? AND status = 'Graded';
+    # api/scoreboard.py and api/admin.py filter status = 'Graded' and GROUP BY
+    # team_id, which this index can satisfy as an ordered index-only scan.
+    __table_args__ = (Index("ix_inject_team_id_status", "team_id", "status"),)
     id = Column(Integer, primary_key=True)
     status = Column(String(255), default="Draft")
     enabled = Column(Boolean, nullable=False, default=True)

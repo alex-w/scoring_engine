@@ -1,7 +1,7 @@
 import html
 
 import pytz
-from sqlalchemy import Boolean, Column, DateTime, Enum, ForeignKey, Integer, PickleType, String, UniqueConstraint
+from sqlalchemy import Boolean, Column, DateTime, Enum, ForeignKey, Index, Integer, PickleType, String, UniqueConstraint
 
 # from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import relationship
@@ -84,7 +84,21 @@ class Flag(Base):
 
 class Solve(Base):
     __tablename__ = "flag_solves"
-    __table_args__ = (UniqueConstraint("flag_id", "host", "team_id", name="_flag_host_team_uc"),)
+    __table_args__ = (
+        UniqueConstraint("flag_id", "host", "team_id", name="_flag_host_team_uc"),
+        # The unique constraint above is flag_id-leading, so it cannot serve
+        # lookups keyed on (host, team_id).  Those happen on every agent
+        # check-in (api/agent.py do_checkin's NOT IN subquery) and on the
+        # api/flags.py solves outer join.  ``host`` is String(260); a 191-char
+        # MySQL prefix keeps the key well under InnoDB's limit while staying
+        # fully selective for hostnames/IPs.  mysql_length is ignored by SQLite.
+        Index(
+            "ix_flag_solves_host_team_id",
+            "host",
+            "team_id",
+            mysql_length={"host": 191},
+        ),
+    )
     id = Column(Integer, primary_key=True, autoincrement=True)
     host = Column(String(260), nullable=False)
     flag_id = Column(String(36), ForeignKey("flags.id"))

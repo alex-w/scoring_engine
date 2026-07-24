@@ -1,7 +1,7 @@
 from datetime import datetime, timezone
 
 import pytz
-from sqlalchemy import Column, DateTime, Integer
+from sqlalchemy import Column, DateTime, Index, Integer
 from sqlalchemy.orm import relationship
 
 from scoring_engine.config import config
@@ -22,6 +22,11 @@ def _ensure_utc_aware(dt):
 
 class Round(Base):
     __tablename__ = "rounds"
+    # Round.number is the de-facto lookup key everywhere: get_last_round_num()
+    # does ORDER BY number DESC LIMIT 1, and the API/admin paths filter on
+    # number = / <= / >=.  Not declared UNIQUE because existing databases may
+    # contain duplicates from partially rolled-back rounds.
+    __table_args__ = (Index("ix_rounds_number", "number"),)
     id = Column(Integer, primary_key=True)
     number = Column(Integer, nullable=False)
     checks = relationship("Check", back_populates="round")
