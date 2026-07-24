@@ -1,5 +1,3 @@
-import html
-
 from flask import flash, redirect, request, url_for
 from flask_login import current_user, login_required
 
@@ -30,7 +28,10 @@ def profile_update_password():
             flash("Passwords do not match.", "danger")
             return redirect(url_for("profile.home"))
         if str(current_user.id) == request.form["user_id"]:
-            current_user.update_password(html.escape(request.form["password"]))
+            # NOTE: do NOT html.escape() the password. It is hashed, never rendered,
+            # and escaping here would silently change the credential so that
+            # /login (which compares the raw string) could never match it.
+            current_user.update_password(request.form["password"])
             current_user.authenticated = False
             db.session.add(current_user)
             db.session.commit()

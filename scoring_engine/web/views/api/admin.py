@@ -1101,7 +1101,10 @@ def admin_update_password():
                 user_obj = db.session.query(User).filter(User.id == request.form["user_id"]).one()
             except NoResultFound:
                 return redirect(url_for("auth.login"))
-            user_obj.update_password(html.escape(request.form["password"]))
+            # NOTE: do NOT html.escape() the password. It is hashed, never rendered,
+            # and escaping here would silently change the credential so that
+            # /login (which compares the raw string) could never match it.
+            user_obj.update_password(request.form["password"])
             user_obj.authenticated = False
             db.session.add(user_obj)
             db.session.commit()
@@ -1120,9 +1123,13 @@ def admin_add_user():
     if current_user.is_white_team:
         if "username" in request.form and "password" in request.form and "team_id" in request.form:
             team_obj = db.session.query(Team).filter(Team.id == request.form["team_id"]).one()
+            # NOTE: credentials are stored verbatim (the password is hashed). Escaping
+            # them here would silently change them so that /login, which compares the
+            # raw submitted values, could never match. Escaping happens at render time
+            # (Jinja autoescapes; JS-built markup escapes explicitly).
             user_obj = User(
-                username=html.escape(request.form["username"]),
-                password=html.escape(request.form["password"]),
+                username=request.form["username"],
+                password=request.form["password"],
                 team=team_obj,
             )
             db.session.add(user_obj)
@@ -1141,7 +1148,12 @@ def admin_add_user():
 def admin_add_team():
     if current_user.is_white_team:
         if "name" in request.form and "color" in request.form:
-            team_obj = Team(html.escape(request.form["name"]), html.escape(request.form["color"]))
+            # NOTE: team names are stored verbatim, exactly as competition.py stores the
+            # ones defined in the YAML. Escaping here would make an admin-created team
+            # named "Team <1>" render as "Team &lt;1&gt;" (double-escaped, since every
+            # render site escapes), and would break agent PSK derivation, which hashes
+            # the raw team name. Escaping happens at render time instead.
+            team_obj = Team(request.form["name"], request.form["color"])
             db.session.add(team_obj)
             db.session.commit()
             flash("Team successfully added.", "success")

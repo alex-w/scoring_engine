@@ -229,17 +229,18 @@ function formatAudience(audience) {
   if (audience.startsWith('team:')) {
     var teamId = audience.split(':')[1];
     var team = teams.find(t => t.id == teamId);
-    return '<span class="badge bg-info">Team: ' + (team ? team.name : teamId) + '</span>';
+    // Team names are stored verbatim -- escape them before building markup.
+    return '<span class="badge bg-info">Team: ' + ScoringEngineUtils.escapeHtml(team ? team.name : teamId) + '</span>';
   }
   if (audience.startsWith('teams:')) {
     var teamIds = audience.split(':')[1].split(',');
     var teamNames = teamIds.map(function(id) {
       var team = teams.find(t => t.id == id.trim());
-      return team ? team.name : id;
+      return ScoringEngineUtils.escapeHtml(team ? team.name : id);
     });
     return '<span class="badge bg-info">Teams: ' + teamNames.join(', ') + '</span>';
   }
-  return '<span class="badge bg-secondary">' + audience + '</span>';
+  return '<span class="badge bg-secondary">' + ScoringEngineUtils.escapeHtml(audience) + '</span>';
 }
 
 function formatDate(dateStr) {
@@ -256,7 +257,8 @@ function loadTeams() {
       teams = data.data;
       var options = '';
       teams.forEach(function(team) {
-        options += '<option value="' + team.id + '">' + team.name + ' (' + team.color + ')</option>';
+        options += '<option value="' + team.id + '">' + ScoringEngineUtils.escapeHtml(team.name) +
+                   ' (' + ScoringEngineUtils.escapeHtml(team.color) + ')</option>';
       });
       $('#create-teams-select').html(options);
       $('#edit-teams-select').html(options);

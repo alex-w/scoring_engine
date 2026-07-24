@@ -172,7 +172,7 @@
       $('#previewModalTitle').text('Preview: ' + filename);
       new bootstrap.Modal(document.getElementById('previewModal')).show();
     } else if (imageExtensions.indexOf(ext) !== -1) {
-      $('#previewModalBody').html('<img src="' + previewUrl + '" class="img-fluid" alt="' + filename + '">');
+      $('#previewModalBody').html('<img src="' + previewUrl + '" class="img-fluid" alt="' + ScoringEngineUtils.escapeHtml(filename) + '">');
       $('#previewModalTitle').text('Preview: ' + filename);
       new bootstrap.Modal(document.getElementById('previewModal')).show();
     } else {
@@ -209,9 +209,9 @@
 
         // Append new files
         $.each(result.data, function (index, value) {
-          files += "<p><a href='/api/inject/{{ inject.id }}/files/" + value.id + "/download'>" + value.name + "</a>";
+          files += "<p><a href='/api/inject/{{ inject.id }}/files/" + value.id + "/download'>" + ScoringEngineUtils.escapeHtml(value.name) + "</a>";
           if (isPreviewable(value.name)) {
-            files += ' <button class="btn btn-sm btn-info" onclick="previewFile(' + value.id + ', \'' + value.name.replace(/'/g, "\\'") + '\')">Preview</button>';
+            files += ' <button class="btn btn-sm btn-info" onclick="previewFile(' + value.id + ', \'' + ScoringEngineUtils.escapeHtml(ScoringEngineUtils.escapeJsString(value.name)) + '\')">Preview</button>';
           }
           files += "</p>";
         });
@@ -238,8 +238,8 @@
           var isOwn = value.team == "{{ current_user.team.name }}";
           comments += '<div class="chart-card mb-2" style="padding:0; overflow:hidden;">' +
             '<div style="padding:0.5rem 1rem; font-size:0.85rem; color:var(--bs-secondary-color);' + (isOwn ? ' border-left:3px solid #58a6ff;' : '') + '">' +
-            '<strong>' + value.user + '</strong> <span class="text-muted">(' + value.team + ')</span> &middot; ' + value.added + '</div>' +
-            '<div style="padding:0.75rem 1rem;">' + value.text + '</div></div>';
+            '<strong>' + ScoringEngineUtils.escapeHtml(value.user) + '</strong> <span class="text-muted">(' + ScoringEngineUtils.escapeHtml(value.team) + ')</span> &middot; ' + ScoringEngineUtils.escapeHtml(value.added) + '</div>' +
+            '<div style="padding:0.75rem 1rem; white-space:pre-wrap;">' + ScoringEngineUtils.escapeHtml(value.text) + '</div></div>';
         });
 
         // Update comments
@@ -295,7 +295,7 @@
         // Build grading form
         var form = '<table class="table table-bordered"><tr><th>Item</th><th>Max Points</th><th>Score</th></tr>';
         $.each(result.rubric_items, function(i, item) {
-          form += '<tr><td>' + item.title + '<br><small class="text-muted">' + (item.description || '') + '</small></td>';
+          form += '<tr><td>' + ScoringEngineUtils.escapeHtml(item.title) + '<br><small class="text-muted">' + ScoringEngineUtils.escapeHtml(item.description || '') + '</small></td>';
           form += '<td>' + item.points + '</td>';
           form += '<td><input type="number" class="form-control rubric-score-input" data-item-id="' + item.id + '" min="0" max="' + item.points + '" value="0"></td></tr>';
         });
@@ -313,7 +313,7 @@
           $.each(result.rubric_scores, function(i, rs) { scoreMap[rs.rubric_item_id] = rs.score; });
         }
         $.each(result.rubric_items, function(i, item) {
-          display += '<tr><td>' + item.title + '</td><td>' + (item.description || '') + '</td><td>' + item.points + '</td>';
+          display += '<tr><td>' + ScoringEngineUtils.escapeHtml(item.title) + '</td><td>' + ScoringEngineUtils.escapeHtml(item.description || '') + '</td><td>' + item.points + '</td>';
           if (result.status === 'Graded') {
             display += '<td>' + (scoreMap[item.id] !== undefined ? scoreMap[item.id] : '-') + '</td>';
           }

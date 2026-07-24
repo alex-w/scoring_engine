@@ -144,6 +144,17 @@ class InjectRubricScore(Base):
 
 
 class InjectComment(Base):
+    """A comment on an inject.
+
+    ``content`` is stored verbatim -- both blue-team authored comments and the
+    auto-generated audit lines (which embed ``current_user.username``, itself
+    stored verbatim). Nothing HTML-escapes it on write on purpose: escaping the
+    source would double-escape once the render site escapes, and would leave the
+    stored text different from what the user typed. Every render site is
+    responsible for escaping (``ScoringEngineUtils.escapeHtml`` in the inject
+    templates, Jinja autoescaping elsewhere).
+    """
+
     __tablename__ = "inject_comment"
     id = Column(Integer, primary_key=True)
     content = Column(Text, nullable=False)

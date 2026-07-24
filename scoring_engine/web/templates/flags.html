@@ -77,11 +77,13 @@ $(document).ready(function() {
                 data: response.data.rows, 
 		scrollX: true,
                 columns: response.data.columns.map(col => ({
-		    title: col.replace("_BTA ", ""),
+		    // Column titles are team names, stored verbatim -- escape them.
+		    title: ScoringEngineUtils.escapeHtml(col.replace("_BTA ", "")),
 		    render: function (data, type, row) {
 			// Render fire for true pwn, gray minus for false/no pwn
 			if(typeof data === "string") {
-			    return data;
+			    // First column is the team name, stored verbatim.
+			    return ScoringEngineUtils.escapeHtml(data);
 			} else if (Array.isArray(data)) {
 			    if(data[1] == 1) {
 			        return "<i class='bi bi-fire' style='color: red'></i>";
@@ -108,7 +110,7 @@ $(document).ready(function() {
       ajax: '/api/flags/totals',
       order: [[1, 'asc']],
       columns: [
-        { data: 'team' },
+        { data: 'team', render: ScoringEngineUtils.dtEscape() },
         { data: 'win_score' },
         { data: 'nix_score' },
         { data: 'total_score' }

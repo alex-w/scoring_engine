@@ -219,7 +219,8 @@
         if ("{{service.id}}" == value['id']) {
           navbar_row_str += " active";
         }
-        navbar_row_str += '">' + key;
+        // `key` is the service name, stored verbatim -- escape before building markup.
+        navbar_row_str += '">' + ScoringEngineUtils.escapeHtml(key);
         if (value['result'] == 'True') {
           navbar_row_str += '<span class="float-end badge bg-success" style="margin-top: 2px;">UP</span>';
         } else if (value['result'] == 'False') {
