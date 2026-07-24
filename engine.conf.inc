@@ -66,6 +66,13 @@ redis_host = 127.0.0.1
 redis_port = 6379
 redis_password =
 
+# Mark the session and remember-me cookies "Secure" so the browser only ever
+# sends them over HTTPS.  Set this to True for any deployment served over TLS
+# (the bundled docker compose stack terminates TLS at nginx and already sets
+# it).  Leave it False for a plain-HTTP dev run, otherwise the browser will
+# drop the session cookie and logins will appear to do nothing.
+session_cookie_secure = False
+
 # SLA Penalty Configuration
 # Enable/disable SLA penalties (consecutive failure penalties)
 sla_enabled = False

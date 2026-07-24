@@ -242,6 +242,9 @@
     if (document.getElementById('file-upload')) {
       new Dropzone('#file-upload', {
         url: '/api/inject/' + INJECT_ID + '/upload',
+        // Dropzone uses its own XHR, so the global jQuery ajaxSend CSRF hook
+        // in base.html does not apply -- set the header explicitly.
+        headers: { 'X-CSRFToken': window.CSRF_TOKEN },
         init: function () {
           this.on("success", function(file) {
             console.log("File uploaded successfully");

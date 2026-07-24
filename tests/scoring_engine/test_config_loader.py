@@ -94,6 +94,17 @@ class TestConfigLoader(object):
         os.environ["SCORINGENGINE_REDIS_HOST"] = "127.0.0.1"
         assert self.config.parse_sources("redis_host", "1.2.3.4") == "127.0.0.1"
 
+    def test_session_cookie_secure_defaults_off(self):
+        """Absent from the config file, so a plain-HTTP dev run still works."""
+        assert self.config.session_cookie_secure is False
+
+    def test_session_cookie_secure_environment_override(self):
+        os.environ["SCORINGENGINE_SESSION_COOKIE_SECURE"] = "true"
+        try:
+            assert ConfigLoader(location="../tests/scoring_engine/engine.conf.inc").session_cookie_secure is True
+        finally:
+            del os.environ["SCORINGENGINE_SESSION_COOKIE_SECURE"]
+
 
 class TestSecretKeyConfig(object):
     """secret_key follows the standard env var -> config file -> default chain."""
