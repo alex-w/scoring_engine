@@ -55,20 +55,57 @@ def upgrade():
     op.create_index("ix_round_score_team_round", TABLE, ["team_id", "round_number"], unique=False)
     op.create_index("ix_round_score_round_number", TABLE, ["round_number"], unique=False)
 
-    # Backfill from existing checks. One row per (round, team) with a non-zero
-    # passing-check point sum. `checks.result = 1` is portable across MariaDB
-    # (TINYINT(1)) and SQLite (INTEGER); both compare boolean truth to 1.
+    # Backfill from existing checks: one row per (round, team) with a non-zero
+    # passing-check point sum. Built with SQLAlchemy core rather than a raw boolean
+    # literal so the truth test renders per dialect -- a hardcoded `result = 1`
+    # breaks on PostgreSQL (boolean vs integer), and a bare `WHERE result` breaks on
+    # MSSQL (BIT), both of which the README lists as supported. `result.is_(True)`
+    # is exactly what the live scoring path uses.
+    checks = sa.table(
+        "checks",
+        sa.column("result", sa.Boolean),
+        sa.column("service_id", sa.Integer),
+        sa.column("round_id", sa.Integer),
+    )
+    services = sa.table(
+        "services",
+        sa.column("id", sa.Integer),
+        sa.column("team_id", sa.Integer),
+        sa.column("points", sa.Integer),
+    )
+    rounds = sa.table("rounds", sa.column("id", sa.Integer), sa.column("number", sa.Integer))
+    round_score = sa.table(
+        TABLE,
+        sa.column("round_id"),
+        sa.column("round_number"),
+        sa.column("team_id"),
+        sa.column("service_points"),
+        sa.column("flag_points"),
+    )
+
+    points_sum = sa.func.sum(services.c.points)
+    backfill_select = (
+        sa.select(
+            rounds.c.id,
+            rounds.c.number,
+            services.c.team_id,
+            points_sum,
+            sa.literal(0),
+        )
+        .select_from(
+            checks.join(services, services.c.id == checks.c.service_id).join(
+                rounds, rounds.c.id == checks.c.round_id
+            )
+        )
+        .where(checks.c.result.is_(True))
+        .group_by(rounds.c.id, rounds.c.number, services.c.team_id)
+        .having(points_sum > 0)
+    )
     op.execute(
-        """
-        INSERT INTO round_score (round_id, round_number, team_id, service_points, flag_points)
-        SELECT r.id, r.number, s.team_id, SUM(s.points), 0
-        FROM checks c
-        JOIN services s ON s.id = c.service_id
-        JOIN rounds r ON r.id = c.round_id
-        WHERE c.result = 1
-        GROUP BY r.id, r.number, s.team_id
-        HAVING SUM(s.points) > 0
-        """
+        round_score.insert().from_select(
+            ["round_id", "round_number", "team_id", "service_points", "flag_points"],
+            backfill_select,
+        )
     )
 
 

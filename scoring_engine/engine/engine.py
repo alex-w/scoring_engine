@@ -557,6 +557,13 @@ class Engine(object):
                 round_obj = Round(round_start=round_start_time, number=self.current_round)
                 self.db.session.add(round_obj)
                 self.db.session.commit()
+                # Capture the round's PK as a plain int now, while nothing is pending
+                # so the read is harmless. commit() above expired round_obj, and later
+                # reading any attribute off it (even the PK) reloads the row and
+                # autoflushes -- which, once checks are pending, would flush them
+                # ahead of the single round-close commit and defeat the failed-round
+                # handling. Use this int for materialization instead.
+                round_id = round_obj.id
 
                 # Pre-fetch all environments needed for result processing in one query
                 all_env_ids = list(set(task_env_map.values()))
@@ -593,6 +600,11 @@ class Engine(object):
                 # We keep track of the number of passed and failed checks per round
                 # so we can report a little bit at the end of each round
                 teams = {}
+                # Accumulate per-team service points for passing checks as we go, so
+                # the round_score rows can be written from memory in the same commit
+                # as the checks -- no extra query, and nothing that would autoflush
+                # the pending checks early.
+                round_points = {}
                 processed_count = 0
                 for team_name, team_task_ids in task_ids.items():
                     for task_id in team_task_ids:
@@ -659,6 +671,8 @@ class Engine(object):
                             }
                         if result:
                             teams[environment.service.team.name]["Success"].append(environment.service.name)
+                            team_id = environment.service.team_id
+                            round_points[team_id] = round_points.get(team_id, 0) + environment.service.points
                         else:
                             teams[environment.service.team.name]["Failed"].append(environment.service.name)
 
@@ -682,16 +696,28 @@ class Engine(object):
                 logger.info("Processed %d check results, committing to database", total_tasks)
                 round_end_time = datetime.now()
                 round_obj.round_end = round_end_time
-                self.db.session.commit()
-                logger.info("Database commit complete")
 
-                # Materialize per-team score facts for this round while its checks
-                # are fresh, in the same transaction boundary as the round itself.
-                # Reads consume these instead of re-scanning the full check history.
+                # Materialize per-team score facts from the sums accumulated above,
+                # staged into the SAME commit as the round's checks so a round and
+                # its scores become visible atomically. Passing the precomputed
+                # points (and clear_existing=False, since a fresh round has no prior
+                # rows) means no query runs here -- nothing autoflushes the pending
+                # checks ahead of this single commit.
                 from scoring_engine.scores import materialize_round
 
-                rows_written = materialize_round(self.db.session, round_obj)
-                logger.info("Materialized round scores for %d team(s)", rows_written)
+                # Use the round_id/current_round ints captured earlier -- reading an
+                # attribute off the (expired) round_obj here would autoflush the
+                # pending checks ahead of this single commit.
+                rows_written = materialize_round(
+                    self.db.session,
+                    round_id,
+                    self.current_round,
+                    points_by_team=round_points,
+                    clear_existing=False,
+                    commit=False,
+                )
+                self.db.session.commit()
+                logger.info("Database commit complete; materialized round scores for %d team(s)", rows_written)
 
             except Exception as e:
                 # Something blew up part way through the round (most often a
