@@ -40,6 +40,8 @@ Configuration Keys
      - The length of time in minutes before a flag becomes active that BTA can grab the flag details
    * - worker_refresh_time
      - Amount of time (seconds) the engine will sleep for in-between polls of worker status
+   * - max_consecutive_round_failures
+     - How many rounds may fail back to back before the engine gives up and exits non-zero. A failed round is rolled back and retried (transient database blips should not stop a competition), but an error that repeats every round is not transient, so the engine exits and lets the container restart make the problem visible. Default is 3. Set to 0 to retry forever (not recommended)
    * - worker_num_concurrent_tasks
      - The number of concurrent tasks the worker will run. Set to -1 to default to number of processors.
    * - worker_queue

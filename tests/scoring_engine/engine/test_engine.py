@@ -3,7 +3,10 @@ from datetime import datetime
 from unittest.mock import MagicMock, patch
 
 import pytest
+from celery import states
+from celery.backends.redis import RedisBackend
 
+from scoring_engine.celery_app import celery_app
 from scoring_engine.checks.agent import AgentCheck
 from scoring_engine.checks.dns import DNSCheck
 from scoring_engine.checks.elasticsearch import ElasticsearchCheck
@@ -635,6 +638,7 @@ class TestFailedRoundRecovery:
 
         engine = Engine(total_rounds=1)
         engine.CLEANUP_RETRY_DELAY = 0
+        engine.ROUND_FAILURE_BACKOFF_BASE = 0
         # Must not raise SystemExit
         engine.run()
 
@@ -654,6 +658,7 @@ class TestFailedRoundRecovery:
 
         engine = Engine(total_rounds=2)
         engine.CLEANUP_RETRY_DELAY = 0
+        engine.ROUND_FAILURE_BACKOFF_BASE = 0
         engine.run()
 
         assert engine.rounds_run == 2
@@ -672,6 +677,7 @@ class TestFailedRoundRecovery:
 
         engine = Engine(total_rounds=1)
         engine.CLEANUP_RETRY_DELAY = 0
+        engine.ROUND_FAILURE_BACKOFF_BASE = 0
 
         with patch("scoring_engine.engine.engine.logger") as mock_logger:
             engine.run()
@@ -702,3 +708,397 @@ class TestFailedRoundRecovery:
     def test_cleanup_is_a_noop_when_nothing_was_written(self):
         engine = Engine()
         assert engine._cleanup_failed_round(99) is True
+
+    @patch("scoring_engine.engine.engine.update_all_cache")
+    def test_cleanup_invalidates_web_caches(self, mock_update_all_cache):
+        """The web app must not keep serving data for a round we just deleted."""
+        env = _make_service()
+        round_obj = Round(round_start=datetime.now(), number=4)
+        db.session.add(round_obj)
+        db.session.commit()
+        db.session.add(Check(service=env.service, round=round_obj))
+        db.session.add(KB(name="task_ids", value="{}", round_num=4))
+        db.session.commit()
+
+        engine = Engine()
+        assert engine._cleanup_failed_round(4) is True
+
+        assert mock_update_all_cache.call_count == 1
+
+    @patch("scoring_engine.engine.engine.update_all_cache")
+    def test_cleanup_does_not_flush_caches_when_nothing_was_removed(self, mock_update_all_cache):
+        engine = Engine()
+        assert engine._cleanup_failed_round(99) is True
+        mock_update_all_cache.assert_not_called()
+
+    @patch("scoring_engine.engine.engine.update_all_cache")
+    def test_cache_failure_does_not_break_cleanup(self, mock_update_all_cache):
+        mock_update_all_cache.side_effect = RuntimeError("redis is gone")
+        env = _make_service()
+        round_obj = Round(round_start=datetime.now(), number=4)
+        db.session.add(round_obj)
+        db.session.commit()
+        db.session.add(Check(service=env.service, round=round_obj))
+        db.session.commit()
+
+        engine = Engine()
+        # The round is still gone, and the cache blow-up did not escape
+        assert engine._cleanup_failed_round(4) is True
+        assert db.session.query(Round).count() == 0
+
+    @patch("scoring_engine.engine.engine.update_all_cache")
+    @patch("scoring_engine.engine.engine.execute_command")
+    def test_failed_round_flushes_caches(self, mock_execute_command, mock_update_all_cache, monkeypatch):
+        _make_service()
+        self._wire_successful_tasks(mock_execute_command)
+        self._break_check_commit(monkeypatch)
+
+        engine = Engine(total_rounds=1)
+        engine.CLEANUP_RETRY_DELAY = 0
+        engine.ROUND_FAILURE_BACKOFF_BASE = 0
+        engine.run()
+
+        # The round never finished, so the only flush is the one that follows
+        # the rollback of the discarded round.
+        assert mock_update_all_cache.call_count == 1
+
+
+class FakeRedisPipeline:
+    """Just enough of a redis-py pipeline for ``RedisBackend._set``."""
+
+    def __init__(self, client):
+        self.client = client
+        self.commands = []
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc_info):
+        return False
+
+    def setex(self, key, ttl, value):
+        self.commands.append((key, value))
+        return self
+
+    def set(self, key, value):
+        self.commands.append((key, value))
+        return self
+
+    def publish(self, key, value):
+        return self
+
+    def execute(self):
+        for key, value in self.commands:
+            self.client.store[key] = value
+        self.commands = []
+        return []
+
+
+class FakeRedisClient:
+    """A dict pretending to be a redis connection.
+
+    Only the wire is faked -- every line of Celery's own RedisBackend runs for
+    real on top of it.
+    """
+
+    def __init__(self):
+        self.store = {}
+        self.mget_calls = []
+
+    def pipeline(self):
+        return FakeRedisPipeline(self)
+
+    def mget(self, keys):
+        keys = list(keys)
+        self.mget_calls.append(keys)
+        return [self.store.get(key) for key in keys]
+
+    def get(self, key):
+        return self.store.get(key)
+
+
+class TestRealResultBackendContract:
+    """Pin the Celery contract the batched fast path depends on.
+
+    The other tests here use a hand-written stand-in for the result backend, so
+    on their own they would happily keep passing if Celery renamed a method or
+    changed how results are stored.  These tests run the real
+    ``celery.backends.redis.RedisBackend`` -- real key naming, real serializer,
+    real ``mget`` -- with only the redis socket replaced by a dict, so no server
+    is needed.
+    """
+
+    @pytest.fixture
+    def backend(self):
+        backend = RedisBackend(app=celery_app)
+        client = FakeRedisClient()
+        # ``client`` is a cached_property; seeding __dict__ stops it dialling out
+        backend.__dict__["client"] = client
+        return backend
+
+    def test_configured_backend_is_a_key_value_backend(self):
+        """The engine's fast path only exists because the app uses redis."""
+        assert isinstance(celery_app.backend, RedisBackend)
+        for attribute in ("get_key_for_task", "mget", "decode_result"):
+            assert callable(getattr(celery_app.backend, attribute))
+
+    @patch("scoring_engine.engine.engine.execute_command")
+    def test_reads_results_the_real_backend_wrote(self, mock_execute_command, backend, db_session):
+        mock_execute_command.backend = backend
+        job = {"environment_id": 12, "errored_out": False, "output": "pong", "command": "ping -c 1"}
+        backend.store_result("done-task", job, states.SUCCESS)
+
+        engine = Engine()
+        metas = engine._fetch_task_metas(["done-task", "never-ran"])
+
+        assert metas["done-task"] == {"status": states.SUCCESS, "result": job}
+        # A task the backend has never stored looks PENDING, exactly like
+        # AsyncResult reports it -- the engine keeps waiting for it.
+        assert metas["never-ran"] == {"status": states.PENDING, "result": None}
+        assert engine._batch_result_fetch is True
+        mock_execute_command.AsyncResult.assert_not_called()
+
+    @patch("scoring_engine.engine.engine.execute_command")
+    def test_one_mget_covers_every_task_and_uses_celery_key_names(
+        self, mock_execute_command, backend, db_session
+    ):
+        mock_execute_command.backend = backend
+        task_ids = ["task-{0}".format(i) for i in range(5)]
+        for task_id in task_ids:
+            backend.store_result(task_id, {"environment_id": 1}, states.SUCCESS)
+
+        engine = Engine()
+        metas = engine._fetch_task_metas(task_ids)
+
+        client = backend.__dict__["client"]
+        assert len(client.mget_calls) == 1
+        assert client.mget_calls[0] == [backend.get_key_for_task(task_id) for task_id in task_ids]
+        # Celery's own key naming, not ours
+        assert client.mget_calls[0][0] in client.store
+        assert all(meta["status"] == states.SUCCESS for meta in metas.values())
+
+    @patch("scoring_engine.engine.engine.execute_command")
+    def test_failed_tasks_never_yield_a_result_payload(self, mock_execute_command, backend, db_session):
+        mock_execute_command.backend = backend
+        backend.store_result("boom-task", RuntimeError("boom"), states.FAILURE)
+
+        engine = Engine()
+        metas = engine._fetch_task_metas(["boom-task"])
+
+        # The engine treats a missing/non-dict result as a timed out check, so
+        # what matters is that a failure never smuggles in a payload.
+        assert metas["boom-task"]["status"] == states.FAILURE
+        assert metas["boom-task"]["result"] is None
+
+    @patch("scoring_engine.engine.engine.execute_command")
+    def test_pending_and_finished_tasks_are_told_apart(self, mock_execute_command, backend, db_session):
+        mock_execute_command.backend = backend
+        backend.store_result("finished", {"environment_id": 1}, states.SUCCESS)
+
+        engine = Engine()
+        completed = set()
+        metas = {}
+        pending = engine.all_pending_tasks({"Team1": ["finished", "still-going"]}, completed, metas)
+
+        assert pending == ["still-going"]
+        assert completed == {"finished"}
+        assert metas["finished"]["result"] == {"environment_id": 1}
+
+
+class TestConsecutiveRoundFailureBound:
+    """Tolerating transient failures is right; tolerating them forever is not."""
+
+    @pytest.fixture(autouse=True)
+    def setup(self, db_session):
+        for name in ("target_round_time", "worker_refresh_time"):
+            setting = Setting.get_setting(name)
+            setting.value = 0
+            db.session.add(setting)
+        db.session.commit()
+
+    @staticmethod
+    def _wire_successful_tasks(mock_execute_command):
+        backend = FakeResultBackend()
+        mock_execute_command.backend = backend
+        counter = itertools.count()
+
+        def fake_apply_async(args=None, queue=None, countdown=0):
+            job = args[0]
+            task_id = "task-{0}".format(next(counter))
+            backend.store[task_id] = _success_meta(job["environment_id"])
+            return MagicMock(id=task_id)
+
+        mock_execute_command.apply_async.side_effect = fake_apply_async
+        return backend
+
+    @staticmethod
+    def _fail_check_commit_on_rounds(monkeypatch, fail_on=None):
+        """Blow up the commit that writes checks, on the given round attempts.
+
+        ``fail_on=None`` fails every round.  Only the check commit is broken, so
+        the round cleanup itself still works and the engine keeps looping.
+        """
+        real_commit = db.session.commit
+        state = {"attempts": 0}
+
+        def flaky_commit():
+            if any(isinstance(obj, Check) for obj in db.session.new):
+                state["attempts"] += 1
+                if fail_on is None or state["attempts"] in fail_on:
+                    raise RuntimeError("database went away")
+            return real_commit()
+
+        monkeypatch.setattr(db.session, "commit", flaky_commit)
+        return state
+
+    @staticmethod
+    def _record_sleeps(engine):
+        sleeps = []
+        engine.sleep = sleeps.append
+        return sleeps
+
+    @patch("scoring_engine.engine.engine.execute_command")
+    def test_engine_exits_when_the_bound_is_hit(self, mock_execute_command, monkeypatch):
+        _make_service()
+        self._wire_successful_tasks(mock_execute_command)
+        self._fail_check_commit_on_rounds(monkeypatch)
+
+        # total_rounds is only a safety net so a broken bound cannot hang here
+        engine = Engine(total_rounds=10)
+        engine.CLEANUP_RETRY_DELAY = 0
+        engine.ROUND_FAILURE_BACKOFF_BASE = 0
+        engine.max_consecutive_round_failures = 3
+
+        with pytest.raises(SystemExit) as exit_info:
+            engine.run()
+
+        assert exit_info.value.code == 1
+        assert engine.consecutive_round_failures == 3
+        assert engine.rounds_run == 3
+        # Every failed round was still discarded cleanly on the way out
+        assert db.session.query(Round).count() == 0
+        assert db.session.query(Check).count() == 0
+        assert db.session.query(KB).count() == 0
+
+    @patch("scoring_engine.engine.engine.execute_command")
+    def test_the_underlying_error_is_logged_before_exiting(self, mock_execute_command, monkeypatch):
+        _make_service()
+        self._wire_successful_tasks(mock_execute_command)
+        self._fail_check_commit_on_rounds(monkeypatch)
+
+        engine = Engine(total_rounds=10)
+        engine.CLEANUP_RETRY_DELAY = 0
+        engine.ROUND_FAILURE_BACKOFF_BASE = 0
+        engine.max_consecutive_round_failures = 2
+
+        with patch("scoring_engine.engine.engine.logger") as mock_logger:
+            with pytest.raises(SystemExit):
+                engine.run()
+
+        give_up_calls = [
+            call for call in mock_logger.error.call_args_list if "consecutive round(s) have failed" in call.args[0]
+        ]
+        assert len(give_up_calls) == 1
+        # The exception that caused the give-up is part of the message
+        assert isinstance(give_up_calls[0].args[-1], RuntimeError)
+        # ...and the traceback was logged too
+        assert mock_logger.exception.called
+
+    @patch("scoring_engine.engine.engine.execute_command")
+    def test_counter_resets_on_a_successful_round(self, mock_execute_command, monkeypatch):
+        """Failures below the bound recover; the counter must not accumulate."""
+        _make_service()
+        self._wire_successful_tasks(mock_execute_command)
+        # Rounds 1, 2, 4 and 5 fail -- four failures in six rounds, but never
+        # three in a row, so the engine must survive all of them.
+        self._fail_check_commit_on_rounds(monkeypatch, fail_on={1, 2, 4, 5})
+
+        engine = Engine(total_rounds=6)
+        engine.CLEANUP_RETRY_DELAY = 0
+        engine.ROUND_FAILURE_BACKOFF_BASE = 0
+        engine.max_consecutive_round_failures = 3
+
+        engine.run()
+
+        assert engine.rounds_run == 6
+        assert engine.consecutive_round_failures == 0
+        # Only the two rounds that finished were recorded
+        assert [r.number for r in db.session.query(Round).all()] == [1, 2]
+        assert db.session.query(Check).count() == 2
+
+    @patch("scoring_engine.engine.engine.execute_command")
+    def test_bound_can_be_disabled(self, mock_execute_command, monkeypatch):
+        _make_service()
+        self._wire_successful_tasks(mock_execute_command)
+        self._fail_check_commit_on_rounds(monkeypatch)
+
+        engine = Engine(total_rounds=4)
+        engine.CLEANUP_RETRY_DELAY = 0
+        engine.ROUND_FAILURE_BACKOFF_BASE = 0
+        engine.max_consecutive_round_failures = 0
+
+        engine.run()
+
+        assert engine.rounds_run == 4
+        assert engine.consecutive_round_failures == 4
+
+    def test_bound_comes_from_config(self):
+        engine = Engine()
+        assert engine.max_consecutive_round_failures == engine.config.max_consecutive_round_failures
+        assert engine.consecutive_round_failures == 0
+
+    def test_disabling_the_bound_is_announced_at_startup(self):
+        """Opting out of the bound is allowed, but never silently."""
+        with patch("scoring_engine.engine.engine.config.max_consecutive_round_failures", 0):
+            with patch("scoring_engine.engine.engine.logger") as mock_logger:
+                engine = Engine()
+
+        assert engine.max_consecutive_round_failures == 0
+        assert any(
+            "max_consecutive_round_failures is disabled" in call.args[0]
+            for call in mock_logger.warning.call_args_list
+        )
+
+    @patch("scoring_engine.engine.engine.execute_command")
+    def test_failed_rounds_back_off_before_retrying(self, mock_execute_command, monkeypatch):
+        """Retrying instantly would hammer a database that is already sick."""
+        _make_service()
+        self._wire_successful_tasks(mock_execute_command)
+        self._fail_check_commit_on_rounds(monkeypatch)
+
+        engine = Engine(total_rounds=10)
+        engine.CLEANUP_RETRY_DELAY = 0
+        engine.max_consecutive_round_failures = 3
+        sleeps = self._record_sleeps(engine)
+
+        with pytest.raises(SystemExit):
+            engine.run()
+
+        # target_round_time is 0 here, so every sleep is the back-off: it grows
+        # per consecutive failure, and the third failure exits instead.
+        assert sleeps == [
+            engine.ROUND_FAILURE_BACKOFF_BASE,
+            engine.ROUND_FAILURE_BACKOFF_BASE * 2,
+        ]
+
+    def test_backoff_is_capped(self):
+        engine = Engine()
+        sleeps = self._record_sleeps(engine)
+
+        engine._sleep_after_failed_round(datetime.now(), consecutive_failures=99)
+
+        assert sleeps == [engine.ROUND_FAILURE_BACKOFF_MAX]
+
+    def test_round_pacing_still_wins_when_it_is_longer(self):
+        setting = Setting.get_setting("target_round_time")
+        setting.value = 120
+        db.session.add(setting)
+        db.session.commit()
+        Setting.clear_cache("target_round_time")
+
+        engine = Engine()
+        sleeps = self._record_sleeps(engine)
+
+        engine._sleep_after_failed_round(datetime.now(), consecutive_failures=1)
+
+        assert sleeps == [120]

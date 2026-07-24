@@ -6,6 +6,7 @@ import os
 import random
 import re
 import signal
+import sys
 import time
 from datetime import datetime
 from functools import partial
@@ -50,6 +51,14 @@ class Engine(object):
     CLEANUP_MAX_ATTEMPTS = 3
     CLEANUP_RETRY_DELAY = 2
 
+    # Minimum pause between consecutive failed rounds.  The failure path
+    # normally paces itself to target_round_time, but a round that fails
+    # *slowly* (say, after waiting out the task ceiling) has no pacing left, and
+    # retrying instantly just hammers a database that is already struggling.
+    # Doubles per consecutive failure up to the cap.
+    ROUND_FAILURE_BACKOFF_BASE = 5
+    ROUND_FAILURE_BACKOFF_MAX = 60
+
     def __init__(self, total_rounds=0):
         self.checks = []
         self.total_rounds = total_rounds
@@ -73,6 +82,18 @@ class Engine(object):
         # Set to False the first time the result backend proves it cannot do
         # bulk lookups, so we stop paying for the failed attempt every poll.
         self._batch_result_fetch = True
+
+        # A failed round is rolled back and retried rather than killing the
+        # process, but only up to a point: an error that reproduces every round
+        # is not a blip, and an engine that spins forever producing no rounds is
+        # worse than one that crashes, because nobody notices it.
+        self.consecutive_round_failures = 0
+        self.max_consecutive_round_failures = max(int(self.config.max_consecutive_round_failures), 0)
+        if self.max_consecutive_round_failures == 0:
+            logger.warning(
+                "max_consecutive_round_failures is disabled: the engine will retry failed rounds "
+                "forever and never exit on its own. Watch the logs for repeated round failures."
+            )
 
         self.load_checks()
         self.round_running = False
@@ -341,11 +362,15 @@ class Engine(object):
                             synchronize_session=False
                         )
                         self.db.session.query(Round).filter(Round.id.in_(round_ids)).delete(synchronize_session=False)
-                    self.db.session.query(KB).filter(KB.round_num == round_number, KB.name == "task_ids").delete(
-                        synchronize_session=False
+                    kb_removed = (
+                        self.db.session.query(KB)
+                        .filter(KB.round_num == round_number, KB.name == "task_ids")
+                        .delete(synchronize_session=False)
                     )
                     self.db.session.commit()
                     logger.info("Cleaned up partially written round %d", round_number)
+                    if round_ids or kb_removed:
+                        self._invalidate_caches_after_cleanup(round_number)
                     return True
                 except Exception as cleanup_error:
                     logger.error(
@@ -368,11 +393,31 @@ class Engine(object):
             # from an empty session either way.
             self.db.session.expunge_all()
 
-    def _sleep_after_failed_round(self, round_start_time):
+    def _invalidate_caches_after_cleanup(self, round_number):
+        """Drop cached API responses that still reference the discarded round.
+
+        The admin rollback endpoint calls ``update_all_cache`` after the exact
+        same delete, and for the same reason: the scoreboard, overview and team
+        endpoints are cached per-visibility, so without this the web app keeps
+        serving data for a round that no longer exists until the next
+        successful round refreshes it.
+        """
+        try:
+            update_all_cache(current_app)
+            logger.info("Flushed caches after discarding round %d", round_number)
+        except Exception:
+            # A cache problem must not mask the round failure we are already
+            # handling.  The next successful round refreshes everything anyway.
+            logger.exception("Unable to update caches after discarding round %d", round_number)
+
+    def _sleep_after_failed_round(self, round_start_time, consecutive_failures=1):
         """Pace the retry after a failed round.
 
         Without this a sustained outage would spin the engine in a tight loop,
-        dispatching a full set of tasks every time round.
+        dispatching a full set of tasks every time round.  We wait out the rest
+        of the round window as usual, but never less than an exponential
+        back-off, so a round that burned its whole window before failing still
+        gives whatever broke some room to recover.
         """
         if self.is_last_round():
             return
@@ -382,9 +427,21 @@ class Engine(object):
             # The database is probably what failed in the first place.
             target_round_time = 60
         round_delta = target_round_time - (datetime.now() - round_start_time).seconds
-        if round_delta > 0:
-            logger.info("Sleeping %d seconds before starting the next round", round_delta)
-            self.sleep(round_delta)
+        # The exponent is clamped as well as the result: with the bound
+        # disabled the failure count is unbounded, and 2 ** (a few thousand) is
+        # an expensive way to arrive at a number we are about to throw away.
+        backoff = min(
+            self.ROUND_FAILURE_BACKOFF_BASE * (2 ** min(max(consecutive_failures, 1) - 1, 16)),
+            self.ROUND_FAILURE_BACKOFF_MAX,
+        )
+        delay = max(round_delta, backoff)
+        if delay > 0:
+            logger.info(
+                "Sleeping %d seconds before retrying (%d consecutive failed round(s))",
+                delay,
+                consecutive_failures,
+            )
+            self.sleep(delay)
 
     def run(self):
         if self.total_rounds == 0:
@@ -654,8 +711,16 @@ class Engine(object):
                 # behind -- it would score every team as if the checks we never
                 # got to had failed -- but a transient error should not take the
                 # whole engine down mid-competition either.  So: discard the
-                # round entirely, then carry on with the next one.
-                logger.error("Error received while writing check results to db")
+                # round entirely, then carry on with the next one -- up to a
+                # point.  An error that reproduces round after round is not
+                # transient, and quietly spinning through a competition
+                # producing no rounds is worse than crashing, because nobody
+                # notices it.
+                self.consecutive_round_failures += 1
+                logger.error(
+                    "Error received while writing check results to db (consecutive failure %d)",
+                    self.consecutive_round_failures,
+                )
                 logger.exception(e)
                 logger.error("Ending round %d and cleaning up the db", self.current_round)
                 if not self._cleanup_failed_round(self.current_round):
@@ -666,8 +731,24 @@ class Engine(object):
                         self.current_round,
                     )
                 self.round_running = False
-                self._sleep_after_failed_round(round_start_time)
+                if (
+                    self.max_consecutive_round_failures
+                    and self.consecutive_round_failures >= self.max_consecutive_round_failures
+                ):
+                    logger.error(
+                        "%d consecutive round(s) have failed (limit %d). This is not a transient "
+                        "problem, so the engine is exiting instead of silently producing no rounds. "
+                        "Last error: %r",
+                        self.consecutive_round_failures,
+                        self.max_consecutive_round_failures,
+                        e,
+                    )
+                    sys.exit(1)
+                self._sleep_after_failed_round(round_start_time, self.consecutive_round_failures)
                 continue
+
+            # The round landed, so whatever went wrong before was transient.
+            self.consecutive_round_failures = 0
 
             logger.info("Finished Round " + str(self.current_round))
             logger.info("Round Duration " + str((round_end_time - round_start_time).seconds) + " seconds")

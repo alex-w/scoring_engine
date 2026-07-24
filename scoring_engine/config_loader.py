@@ -74,6 +74,12 @@ class ConfigLoader(object):
             "int",
         )
 
+        self.max_consecutive_round_failures = self.parse_sources(
+            "max_consecutive_round_failures",
+            int(self.parser["OPTIONS"].get("max_consecutive_round_failures", "3")),
+            "int",
+        )
+
         self.engine_paused = self.parse_sources(
             "engine_paused",
             self.parser["OPTIONS"]["engine_paused"].lower() == "true",
