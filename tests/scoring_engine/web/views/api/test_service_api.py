@@ -116,10 +116,22 @@ class TestUpdateServiceAccount:
         assert resp.json["status"] == "Updated Account Information"
 
     def test_invalid_characters_rejected(self):
+        # Credentials now accept any printable ASCII (so that real passwords
+        # containing < > & $ etc. can be entered); control characters and
+        # non-ASCII remain rejected.  "bad<>chars" is deliberately valid now --
+        # see test_service_account_credential_chars.py.
         self.login("blueuser")
         resp = self.client.post(
             "/api/service/update_account",
-            data={"pk": self.account.id, "name": "username", "value": "bad<>chars"},
+            data={"pk": self.account.id, "name": "username", "value": "bad\x00chars"},
+        )
+        assert "Invalid characters" in resp.json["error"]
+
+    def test_non_ascii_characters_rejected(self):
+        self.login("blueuser")
+        resp = self.client.post(
+            "/api/service/update_account",
+            data={"pk": self.account.id, "name": "username", "value": "café"},
         )
         assert "Invalid characters" in resp.json["error"]
 
