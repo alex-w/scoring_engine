@@ -2,7 +2,7 @@ import html
 from datetime import datetime, timezone
 
 import pytz
-from sqlalchemy import Boolean, Column, DateTime, ForeignKey, Integer, Text, UnicodeText
+from sqlalchemy import Boolean, Column, DateTime, ForeignKey, Index, Integer, Text, UnicodeText
 from sqlalchemy.orm import relationship
 
 from scoring_engine.config import config
@@ -12,6 +12,21 @@ from scoring_engine.models.base import Base
 
 class Check(Base):
     __tablename__ = "checks"
+    # ``checks`` is by far the largest table (services x rounds).  InnoDB gives
+    # us implicit single-column indexes on the two FK columns and nothing else,
+    # which leaves every composite/covering access path doing a full scan.
+    __table_args__ = (
+        # sla.get_consecutive_failures / get_max_consecutive_failures and
+        # Service.checks_reversed: WHERE service_id = ? ORDER BY round_id.
+        # Without this, MySQL scans every check row and filesorts.
+        Index("ix_checks_service_id_round_id", "service_id", "round_id"),
+        # Service.score_earned: COUNT(*) WHERE service_id = ? AND result = 1,
+        # and Service.max_score: COUNT(*) WHERE service_id = ?.
+        Index("ix_checks_service_id_result", "service_id", "result"),
+        # api/overview.py num_up_services / num_down_services and
+        # api/admin.py round stats: WHERE round_id = ? AND result = ?.
+        Index("ix_checks_round_id_result", "round_id", "result"),
+    )
     id = Column(Integer, primary_key=True)
     round_id = Column(Integer, ForeignKey("rounds.id"))
     round = relationship("Round", back_populates="checks")
