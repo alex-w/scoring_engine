@@ -3,7 +3,7 @@ import html
 import uuid
 
 import pytz
-from sqlalchemy import Boolean, Column, DateTime, Enum, ForeignKey, Index, Integer, PickleType, String, UniqueConstraint
+from sqlalchemy import JSON, Boolean, Column, DateTime, Enum, ForeignKey, Index, Integer, String, UniqueConstraint
 
 # from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import relationship
@@ -37,7 +37,10 @@ class Flag(Base):
     id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
     type = Column(Enum(FlagTypeEnum), nullable=False)
     platform = Column(Enum(Platform), nullable=False)
-    data = Column(PickleType, nullable=False)
+    # JSON rather than PickleType: pickle in the DB is a deserialization risk and
+    # cannot be queried or migrated. SQLAlchemy's generic JSON type renders as a
+    # native JSON column on MySQL/MariaDB and as TEXT-with-JSON-serialization on SQLite.
+    data = Column(JSON, nullable=False)
     start_time = Column(DateTime(timezone=True), nullable=False)
     end_time = Column(DateTime(timezone=True), nullable=False)
     perm = Column(Enum(Perm), nullable=False)
