@@ -1198,7 +1198,12 @@ def admin_add_user():
 def admin_add_team():
     if current_user.is_white_team:
         if "name" in request.form and "color" in request.form:
-            team_obj = Team(html.escape(request.form["name"]), html.escape(request.form["color"]))
+            # NOTE: team names are stored verbatim, exactly as competition.py stores the
+            # ones defined in the YAML. Escaping here would make an admin-created team
+            # named "Team <1>" render as "Team &lt;1&gt;" (double-escaped, since every
+            # render site escapes), and would break agent PSK derivation, which hashes
+            # the raw team name. Escaping happens at render time instead.
+            team_obj = Team(request.form["name"], request.form["color"])
             db.session.add(team_obj)
             db.session.commit()
             flash("Team successfully added.", "success")

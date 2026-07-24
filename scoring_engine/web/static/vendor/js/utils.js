@@ -64,11 +64,41 @@ var ScoringEngineUtils = (function() {
             .replace(/'/g, '&#39;');
     }
 
+    /**
+     * Escape a value for embedding inside a single-quoted JavaScript string
+     * literal that itself lives inside an HTML attribute (e.g. an inline
+     * onclick handler).  Apply escapeHtml() to the result as well: this handles
+     * the JS layer, escapeHtml() handles the HTML layer.
+     * @param {*} value - The value to escape
+     * @returns {string} - String safe inside a single-quoted JS literal
+     */
+    function escapeJsString(value) {
+        return String(value === null || value === undefined ? '' : value)
+            .replace(/\\/g, '\\\\')
+            .replace(/'/g, "\\'")
+            .replace(/\r/g, '\\r')
+            .replace(/\n/g, '\\n');
+    }
+
+    /**
+     * DataTables column renderer that HTML-escapes the display value.
+     * DataTables writes cell content with innerHTML, so any column bound to
+     * user-controlled data (team names, usernames, ...) must use this.
+     * @returns {function} - A DataTables render callback
+     */
+    function dtEscape() {
+        return function(data, type) {
+            return type === 'display' ? escapeHtml(data) : data;
+        };
+    }
+
     // Public API
     return {
         sanitizeSelector: sanitizeSelector,
         animateCounter: animateCounter,
         setText: setText,
-        escapeHtml: escapeHtml
+        escapeHtml: escapeHtml,
+        escapeJsString: escapeJsString,
+        dtEscape: dtEscape
     };
 })();

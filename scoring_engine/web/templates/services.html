@@ -128,7 +128,8 @@
                             {
                                 "data": null,
                                 "render": function( data ) {
-                                    return '<a href="/service/' + data.service_id + '">' + data.service_name + '</a>';
+                                    // Service names are stored verbatim -- escape them.
+                                    return '<a href="/service/' + data.service_id + '">' + ScoringEngineUtils.escapeHtml(data.service_name) + '</a>';
                                 }
                             },
                             { "data": "host" },

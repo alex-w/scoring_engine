@@ -133,8 +133,12 @@
         $.each(data.service_table, function(i, row) {
             svcRows.push([row.team, row.score.toLocaleString(), row.rank]);
         });
+        // DataTables writes cells with innerHTML and team names are stored verbatim,
+        // so the team column needs an escaping renderer (sorting/search/copy still
+        // see the raw value).
         $('#service-scoring').DataTable({
-            data: svcRows, paging: false, searching: false, order: [[2, 'asc']]
+            data: svcRows, paging: false, searching: false, order: [[2, 'asc']],
+            columnDefs: [{ targets: 0, render: ScoringEngineUtils.dtEscape() }]
         });
 
         // Inject scoring table
@@ -150,7 +154,8 @@
             ]);
         });
         $('#inject-scoring').DataTable({
-            data: injRows, paging: false, searching: false, order: [[10, 'desc']]
+            data: injRows, paging: false, searching: false, order: [[10, 'desc']],
+            columnDefs: [{ targets: 0, render: ScoringEngineUtils.dtEscape() }]
         });
     });
     {% endif %}
@@ -166,11 +171,13 @@
                 var pct = counts.total > 0 ? ((counts.up / counts.total) * 100).toFixed(1) : '0.0';
                 summaryRows.push([serviceName, counts.up, counts.down, counts.total, pct + '%']);
             });
+            // Service names are stored verbatim -- escape them at render time.
             $('#service-summary').DataTable({
                 data: summaryRows,
                 paging: false,
                 searching: false,
-                order: [[0, 'asc']]
+                order: [[0, 'asc']],
+                columnDefs: [{ targets: 0, render: ScoringEngineUtils.dtEscape() }]
             });
 
             // Populate per-round stats table
@@ -183,7 +190,7 @@
                 var breakdown = row.service_breakdown || {};
                 $.each(breakdown, function(svc, counts) {
                     if (counts.down > 0) {
-                        failures.push('<span class="text-danger">' + svc + ' x' + counts.down + '</span>');
+                        failures.push('<span class="text-danger">' + ScoringEngineUtils.escapeHtml(svc) + ' x' + counts.down + '</span>');
                     }
                 });
                 var failureText = failures.length > 0 ? failures.join(', ') : '<span class="text-success">All passing</span>';

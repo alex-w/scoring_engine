@@ -228,7 +228,8 @@ $(document).ready(function() {
         for (var i = 0; i < data.teams.length; i++) {
           var team = data.teams[i];
           html += '<tr>';
-          html += '<td>' + team.team_name + '</td>';
+          // Team names are stored verbatim -- escape before building markup.
+          html += '<td>' + ScoringEngineUtils.escapeHtml(team.team_name) + '</td>';
           html += '<td>' + team.base_score.toLocaleString() + '</td>';
           html += '<td class="text-danger">' + (team.total_penalties > 0 ? '-' + team.total_penalties.toLocaleString() : '0') + '</td>';
           html += '<td><strong>' + team.adjusted_score.toLocaleString() + '</strong></td>';

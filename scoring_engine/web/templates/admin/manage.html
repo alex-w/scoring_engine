@@ -90,7 +90,9 @@
     </table>
   </div>
   <script>
-    /* Usernames are stored verbatim, so escape them before building markup. */
+    /* Usernames and team names are stored verbatim, so escape them before
+       building markup. DataTables writes cell content with innerHTML, so the
+       team name/color columns need an escaping renderer too. */
     var escapeHtml = ScoringEngineUtils.escapeHtml;
 
     /* Formatting function for row details - modify as you need */
@@ -133,8 +135,8 @@
               "data": null,
               "defaultContent": ''
             },
-            { "data": "name" },
-            { "data": "color" }
+            { "data": "name", "render": ScoringEngineUtils.dtEscape() },
+            { "data": "color", "render": ScoringEngineUtils.dtEscape() }
           ],
           'order': [[2, 'asc']],
           'paging': false,

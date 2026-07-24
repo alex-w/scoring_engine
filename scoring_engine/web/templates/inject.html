@@ -148,7 +148,7 @@
           headerHtml += '<span class="badge bg-warning text-dark">' + r.status + '</span>';
         }
         if (r.category) {
-          headerHtml += ' <span class="badge bg-secondary">' + r.category + '</span>';
+          headerHtml += ' <span class="badge bg-secondary">' + ScoringEngineUtils.escapeHtml(r.category) + '</span>';
         }
         headerHtml += '</div>';
         if (r.status == 'Draft' && !r.expired) {
@@ -209,8 +209,8 @@
             $.each(r.rubric_scores, function(i, rs) { scoreMap[rs.rubric_item_id] = rs.score; });
           }
           $.each(r.rubric_items, function(i, item) {
-            rubricHtml += '<tr><td style="padding:0.5rem 1rem;">' + item.title + '</td>';
-            rubricHtml += '<td style="padding:0.5rem 1rem;">' + (item.description || '') + '</td>';
+            rubricHtml += '<tr><td style="padding:0.5rem 1rem;">' + ScoringEngineUtils.escapeHtml(item.title) + '</td>';
+            rubricHtml += '<td style="padding:0.5rem 1rem;">' + ScoringEngineUtils.escapeHtml(item.description || '') + '</td>';
             rubricHtml += '<td style="padding:0.5rem 1rem;">' + item.points + '</td>';
             if (showScores) {
               rubricHtml += '<td style="padding:0.5rem 1rem;">' + (scoreMap[item.id] !== undefined ? scoreMap[item.id] : '-') + '</td>';
@@ -297,7 +297,7 @@
           if (window.location.pathname == "/inject/" + value.id) {
             navbar += ' active';
           }
-          navbar += '">' + value.title + ' ';
+          navbar += '">' + ScoringEngineUtils.escapeHtml(value.title) + ' ';
           var currentTime = new Date();
           var endTime = new Date(value.end_time);
           if (value.status == "Graded") {
@@ -341,7 +341,7 @@
       $('#previewModalTitle').text('Preview: ' + filename);
       new bootstrap.Modal(document.getElementById('previewModal')).show();
     } else if (imageExtensions.indexOf(ext) !== -1) {
-      $('#previewModalBody').html('<img src="' + previewUrl + '" class="img-fluid" alt="' + filename + '">');
+      $('#previewModalBody').html('<img src="' + previewUrl + '" class="img-fluid" alt="' + ScoringEngineUtils.escapeHtml(filename) + '">');
       $('#previewModalTitle').text('Preview: ' + filename);
       new bootstrap.Modal(document.getElementById('previewModal')).show();
     } else if (ext === '.odt' || ext === '.docx') {
@@ -374,9 +374,9 @@
       success: function (result) {
         var files = '';
         $.each(result.data, function (index, value) {
-          files += "<p><a href='/api/inject/" + INJECT_ID + "/files/" + value.id + "/download'>" + value.name + "</a>";
+          files += "<p><a href='/api/inject/" + INJECT_ID + "/files/" + value.id + "/download'>" + ScoringEngineUtils.escapeHtml(value.name) + "</a>";
           if (isPreviewable(value.name)) {
-            files += ' <button class="btn btn-sm btn-info" onclick="previewFile(' + value.id + ', \'' + value.name.replace(/'/g, "\\'") + '\')">Preview</button>';
+            files += ' <button class="btn btn-sm btn-info" onclick="previewFile(' + value.id + ', \'' + ScoringEngineUtils.escapeHtml(ScoringEngineUtils.escapeJsString(value.name)) + '\')">Preview</button>';
           }
           if (canDelete) {
             files += ' <button class="btn btn-sm btn-danger delete-file-btn" data-file-id="' + value.id + '">Delete</button>';
@@ -420,7 +420,7 @@
           comments += '<div class="chart-card mb-2" style="padding:0; overflow:hidden;">' +
             '<div style="padding:0.5rem 1rem; font-size:0.85rem; color:var(--bs-secondary-color);' + (isOwn ? ' border-left:3px solid #58a6ff;' : '') + '">' +
             '<strong>' + ScoringEngineUtils.escapeHtml(value.user) + '</strong> <span class="text-muted">(' + ScoringEngineUtils.escapeHtml(value.team) + ')</span> &middot; ' + ScoringEngineUtils.escapeHtml(value.added) + '</div>' +
-            '<div style="padding:0.75rem 1rem;">' + value.text + '</div></div>';
+            '<div style="padding:0.75rem 1rem; white-space:pre-wrap;">' + ScoringEngineUtils.escapeHtml(value.text) + '</div></div>';
         });
         $("#comments").html(comments);
       },

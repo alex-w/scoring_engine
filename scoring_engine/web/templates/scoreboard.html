@@ -161,7 +161,9 @@
                         axisPointer: { type: 'shadow' },
                         formatter: function(params) {
                             var idx = params[0].dataIndex;
-                            var result = params[0].name + '<br/>';
+                            // ECharts renders tooltip formatter output as HTML;
+                            // params[0].name is the team name, stored verbatim.
+                            var result = ScoringEngineUtils.escapeHtml(params[0].name) + '<br/>';
                             var services = serviceScoresRaw[idx] || 0;
                             var injects = injectScoresRaw[idx] || 0;
                             var penalty = slaPenaltiesRaw[idx] || 0;
