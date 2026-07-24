@@ -85,21 +85,6 @@ class Engine(object):
             logger.debug(" Found " + loaded_check.__name__)
             self.add_check(loaded_check)
 
-    # @staticmethod
-    # def load_check_files(checks_location):
-    #     checks_location_module_str = checks_location.replace("/", ".")
-    #     found_check_modules = pynsive.list_modules(checks_location_module_str)
-    #     found_checks = []
-    #     for found_module in found_check_modules:
-    #         module_obj = pynsive.import_module(found_module)
-    #         for name, arg in inspect.getmembers(module_obj):
-    #             if name == "BasicCheck" or name == "HTTPPostCheck":
-    #                 continue
-    #             elif not name.endswith("Check"):
-    #                 continue
-    #             found_checks.append(arg)
-    #     return found_checks
-
     @staticmethod
     def load_check_files(checks_location):
         found_checks = []
@@ -420,24 +405,12 @@ class Engine(object):
 
                         check = Check(service=environment.service, round=round_obj)
 
-                        # TODO: File writes disabled for performance investigation.
-                        # Re-enable once Redis output cap proves sufficient.
-                        # # Write full output to disk for later retrieval
-                        # try:
-                        #     team_name_safe = environment.service.team.name
-                        #     service_name_safe = environment.service.name
-                        #     output_dir = os.path.join(
-                        #         self.config.check_output_folder,
-                        #         team_name_safe,
-                        #         service_name_safe,
-                        #     )
-                        #     os.makedirs(output_dir, exist_ok=True)
-                        #     output_path = os.path.join(output_dir, f"round_{self.current_round}.txt")
-                        #     with open(output_path, "w") as f:
-                        #         f.write(full_output)
-                        # except Exception as write_err:
-                        #     logger.warning("Failed to write check output to disk: %s", write_err)
-
+                        # NOTE: the engine intentionally does not archive full check output to
+                        # config.check_output_folder. Per-round file writes were disabled during a
+                        # performance investigation and never restored, so
+                        # /api/admin/check/<id>/full_output always falls back to the truncated DB
+                        # copy written below. Only revisit if the 5K cap proves insufficient for
+                        # operators; see git history for the removed implementation.
                         # Store 5K in DB (matches Redis MAX_OUTPUT cap)
                         command = task_result["command"] if task_result else ""
                         check.finished(
