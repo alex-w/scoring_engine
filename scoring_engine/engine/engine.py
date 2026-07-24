@@ -6,12 +6,12 @@ import os
 import random
 import re
 import signal
-import sys
 import time
 from datetime import datetime
 from functools import partial
 from pathlib import Path
 
+from celery import states
 from flask import current_app
 from sqlalchemy.orm import selectinload
 
@@ -36,6 +36,20 @@ def engine_sigint_handler(signum, frame, engine):
 
 
 class Engine(object):
+    # Maximum number of task ids asked of the Celery result backend in a single
+    # round-trip.  Collapses thousands of per-task lookups into a handful of
+    # batched calls while keeping each individual command a sane size.
+    RESULT_FETCH_CHUNK_SIZE = 500
+
+    # Lower bound for the hard ceiling on how long we wait for a round's tasks
+    # to finish.  The effective ceiling is max(target_round_time * 3, this).
+    ROUND_WAIT_FLOOR = 300
+
+    # How many times we try to remove a partially written round before giving up
+    # (and how long we wait between attempts, multiplied by the attempt number).
+    CLEANUP_MAX_ATTEMPTS = 3
+    CLEANUP_RETRY_DELAY = 2
+
     def __init__(self, total_rounds=0):
         self.checks = []
         self.total_rounds = total_rounds
@@ -55,6 +69,10 @@ class Engine(object):
         signal.signal(signal.SIGTERM, partial(engine_sigint_handler, engine=self))
 
         self.current_round = Round.get_last_round_num()
+
+        # Set to False the first time the result backend proves it cannot do
+        # bulk lookups, so we stop paying for the failed attempt every poll.
+        self._batch_result_fetch = True
 
         self.load_checks()
         self.round_running = False
@@ -181,26 +199,192 @@ class Engine(object):
     def is_last_round(self):
         return self.last_round or (self.rounds_run == self.total_rounds and self.total_rounds != 0)
 
-    def all_pending_tasks(self, tasks, completed=None):
+    def _fetch_task_metas(self, task_ids):
+        """Fetch Celery result metadata for many tasks with as few round-trips as possible.
+
+        Returns a dict of ``task_id -> {"status": ..., "result": ...}``.  A task
+        the backend has never heard of reports ``PENDING`` with no result, which
+        is exactly what ``AsyncResult`` does.  ``result`` is only populated for
+        ``SUCCESS`` tasks, matching the previous per-task behaviour that avoided
+        deserializing payloads nobody looks at.
+        """
+        ordered_ids = list(dict.fromkeys(task_ids))
+        if not ordered_ids:
+            return {}
+
+        if self._batch_result_fetch:
+            try:
+                return self._fetch_task_metas_batched(ordered_ids)
+            except (AttributeError, NotImplementedError, TypeError) as e:
+                # The configured result backend cannot do bulk lookups (or is a
+                # stand-in that does not behave like one).  Everything else --
+                # connection errors and the like -- propagates just as it did
+                # when we called AsyncResult() one task at a time.
+                self._batch_result_fetch = False
+                logger.warning(
+                    "Result backend does not support batched lookups (%s), falling back to per-task fetching",
+                    e,
+                )
+        return self._fetch_task_metas_individually(ordered_ids)
+
+    def _fetch_task_metas_batched(self, task_ids):
+        """Read many task results out of the result backend using its bulk mget API."""
+        backend = execute_command.backend
+        metas = {}
+        for start in range(0, len(task_ids), self.RESULT_FETCH_CHUNK_SIZE):
+            end = start + self.RESULT_FETCH_CHUNK_SIZE
+            chunk = task_ids[start:end]
+            payloads = backend.mget([backend.get_key_for_task(task_id) for task_id in chunk])
+            if not isinstance(payloads, (list, tuple)) or len(payloads) != len(chunk):
+                raise TypeError(
+                    "result backend mget returned {0}, expected a sequence of {1} value(s)".format(
+                        type(payloads).__name__, len(chunk)
+                    )
+                )
+            for task_id, payload in zip(chunk, payloads):
+                metas[task_id] = self._meta_from_payload(backend, task_id, payload)
+        return metas
+
+    @staticmethod
+    def _meta_from_payload(backend, task_id, payload):
+        """Turn a raw result-backend payload into the meta dict the engine consumes."""
+        if not payload:
+            # Nothing stored for this task yet: it has not finished (or its
+            # result already expired).  AsyncResult calls this PENDING too.
+            return {"status": states.PENDING, "result": None}
+        try:
+            meta = backend.decode_result(payload)
+        except Exception:
+            # A payload we cannot deserialize is never going to become usable,
+            # so treat it as a finished-but-broken task instead of waiting for
+            # it until the round ceiling.
+            logger.warning("Unable to decode result payload for task %s, treating it as failed", task_id)
+            return {"status": states.FAILURE, "result": None}
+        status = meta.get("status", states.PENDING)
+        return {
+            "status": status,
+            "result": meta.get("result") if status == states.SUCCESS else None,
+        }
+
+    @staticmethod
+    def _fetch_task_metas_individually(task_ids):
+        """Per-task fallback for result backends without bulk lookups."""
+        metas = {}
+        for task_id in task_ids:
+            task = execute_command.AsyncResult(task_id)
+            status = task.state
+            metas[task_id] = {
+                "status": status,
+                "result": task.result if status == states.SUCCESS else None,
+            }
+        return metas
+
+    def all_pending_tasks(self, tasks, completed=None, metas=None):
         """Return list of task IDs still in PENDING state.
 
         Args:
             tasks: dict of team_name -> [task_id, ...]
             completed: optional set of already-completed task IDs to skip
+            metas: optional dict, populated with the result metadata of every
+                task that finished in a terminal state.  Lets the caller reuse
+                what we already fetched instead of asking the backend again.
         """
         if completed is None:
             completed = set()
-        pending_tasks = []
+
+        to_check = []
+        seen = set()
         for team_name, task_ids in tasks.items():
             for task_id in task_ids:
-                if task_id in completed:
+                if task_id in completed or task_id in seen:
                     continue
-                task = execute_command.AsyncResult(task_id)
-                if task.state == "PENDING":
-                    pending_tasks.append(task_id)
-                else:
-                    completed.add(task_id)
+                seen.add(task_id)
+                to_check.append(task_id)
+
+        fetched = self._fetch_task_metas(to_check)
+
+        pending_tasks = []
+        for task_id in to_check:
+            meta = fetched.get(task_id) or {"status": states.PENDING, "result": None}
+            status = meta.get("status", states.PENDING)
+            if status == states.PENDING:
+                pending_tasks.append(task_id)
+            else:
+                completed.add(task_id)
+                # Only cache terminal results.  Transient states (STARTED,
+                # RETRY) still count as "not pending" -- same as before -- but
+                # their meta can still change, so we re-read those later.
+                if metas is not None and status in states.READY_STATES:
+                    metas[task_id] = meta
         return pending_tasks
+
+    def _cleanup_failed_round(self, round_number):
+        """Remove every trace of a partially written round.
+
+        Deletes by round number rather than by object identity: the session has
+        to be rolled back first (which detaches everything we added), and doing
+        it by number also catches rows that were written but never tracked.
+        The deletes and the commit are a single transaction, so the round is
+        either entirely gone or entirely untouched.
+
+        Returns True when the database is known to be clean afterwards.
+        """
+        try:
+            for attempt in range(1, self.CLEANUP_MAX_ATTEMPTS + 1):
+                try:
+                    self.db.session.rollback()
+                    round_ids = [
+                        row.id for row in self.db.session.query(Round.id).filter(Round.number == round_number).all()
+                    ]
+                    if round_ids:
+                        self.db.session.query(Check).filter(Check.round_id.in_(round_ids)).delete(
+                            synchronize_session=False
+                        )
+                        self.db.session.query(Round).filter(Round.id.in_(round_ids)).delete(synchronize_session=False)
+                    self.db.session.query(KB).filter(KB.round_num == round_number, KB.name == "task_ids").delete(
+                        synchronize_session=False
+                    )
+                    self.db.session.commit()
+                    logger.info("Cleaned up partially written round %d", round_number)
+                    return True
+                except Exception as cleanup_error:
+                    logger.error(
+                        "Cleanup attempt %d/%d for round %d failed",
+                        attempt,
+                        self.CLEANUP_MAX_ATTEMPTS,
+                        round_number,
+                    )
+                    logger.exception(cleanup_error)
+                    try:
+                        self.db.session.rollback()
+                    except Exception:
+                        logger.exception("Unable to roll back the database session while cleaning up")
+                    if attempt < self.CLEANUP_MAX_ATTEMPTS:
+                        self.sleep(self.CLEANUP_RETRY_DELAY * attempt)
+            return False
+        finally:
+            # Bulk deletes do not touch the identity map, and a failed round
+            # leaves half-built objects lying around.  Start the next round
+            # from an empty session either way.
+            self.db.session.expunge_all()
+
+    def _sleep_after_failed_round(self, round_start_time):
+        """Pace the retry after a failed round.
+
+        Without this a sustained outage would spin the engine in a tight loop,
+        dispatching a full set of tasks every time round.
+        """
+        if self.is_last_round():
+            return
+        try:
+            target_round_time = int(Setting.get_setting("target_round_time").value)
+        except Exception:
+            # The database is probably what failed in the first place.
+            target_round_time = 60
+        round_delta = target_round_time - (datetime.now() - round_start_time).seconds
+        if round_delta > 0:
+            logger.info("Sleeping %d seconds before starting the next round", round_delta)
+            self.sleep(round_delta)
 
     def run(self):
         if self.total_rounds == 0:
@@ -277,29 +461,29 @@ class Engine(object):
             total_tasks = sum(len(ids) for ids in task_ids.values())
             logger.info("Dispatched %d tasks to %d team queues", total_tasks, len(task_ids))
 
-            # This array keeps track of all current round objects
-            # incase we need to backout any changes to prevent
-            # inconsistent check results
-            cleanup_items = []
-
+            # Everything written below is tagged with self.current_round, so
+            # _cleanup_failed_round() can back the whole round out by number if
+            # anything goes wrong and leave the db in a consistent state.
             try:
                 # We store the list of tasks in the db, so that the web app
                 # can consume them and can dynamically update a progress bar
                 task_ids_str = json.dumps(task_ids)
                 latest_kb = KB(name="task_ids", value=task_ids_str, round_num=self.current_round)
-                cleanup_items.append(latest_kb)
                 self.db.session.add(latest_kb)
                 self.db.session.commit()
                 logger.info("Saved task manifest to KB, waiting for workers")
 
                 completed_tasks = set()
-                pending_tasks = self.all_pending_tasks(task_ids, completed_tasks)
+                # Result metadata harvested while polling, so the result
+                # processing below does not have to ask the backend twice.
+                task_metas = {}
+                pending_tasks = self.all_pending_tasks(task_ids, completed_tasks, task_metas)
                 round_wait_start = time.time()
                 # Pre-fetch settings used in the wait loop
                 target_round_time = int(Setting.get_setting("target_round_time").value)
                 worker_refresh_time = int(Setting.get_setting("worker_refresh_time").value)
                 # Hard ceiling: 3x the target round time or 5 minutes, whichever is greater
-                max_round_wait = max(target_round_time * 3, 300)
+                max_round_wait = max(target_round_time * 3, self.ROUND_WAIT_FLOOR)
                 while pending_tasks:
                     elapsed = time.time() - round_wait_start
                     if elapsed >= max_round_wait:
@@ -308,20 +492,20 @@ class Engine(object):
                             elapsed,
                             len(pending_tasks),
                         )
-                        for stuck_task_id in pending_tasks:
-                            execute_command.AsyncResult(stuck_task_id).revoke(terminate=True)
+                        # One broadcast for the whole batch instead of one per
+                        # task; the worker-side revoke command takes a list.
+                        execute_command.app.control.revoke(list(pending_tasks), terminate=True)
                         break
                     waiting_info = "Waiting for all jobs to finish (sleeping " + str(worker_refresh_time) + " seconds)"
                     waiting_info += " " + str(len(pending_tasks)) + " left in queue."
                     logger.info(waiting_info)
                     self.sleep(worker_refresh_time)
-                    pending_tasks = self.all_pending_tasks(task_ids, completed_tasks)
+                    pending_tasks = self.all_pending_tasks(task_ids, completed_tasks, task_metas)
                 else:
                     logger.info("All jobs have finished for this round")
 
                 logger.info("Determining check results and saving to db")
                 round_obj = Round(round_start=round_start_time, number=self.current_round)
-                cleanup_items.append(round_obj)
                 self.db.session.add(round_obj)
                 self.db.session.commit()
 
@@ -337,27 +521,38 @@ class Engine(object):
 
                 logger.info("Pre-fetched %d environments, processing task results", len(env_cache))
 
+                # Anything we did not already collect while polling (revoked or
+                # stuck tasks, plus whatever finished since the last poll) is
+                # fetched now in a single batched pass.
+                missing_task_ids = [
+                    task_id
+                    for team_task_ids in task_ids.values()
+                    for task_id in team_task_ids
+                    if task_id not in task_metas
+                ]
+                if missing_task_ids:
+                    fetch_start = time.time()
+                    task_metas.update(self._fetch_task_metas(missing_task_ids))
+                    fetch_elapsed = time.time() - fetch_start
+                    log = logger.warning if fetch_elapsed > 5.0 else logger.info
+                    log(
+                        "Fetched %d outstanding task result(s) from the result backend in %.1fs",
+                        len(missing_task_ids),
+                        fetch_elapsed,
+                    )
+
                 # We keep track of the number of passed and failed checks per round
                 # so we can report a little bit at the end of each round
                 teams = {}
                 processed_count = 0
-                for team_name, task_ids in task_ids.items():
-                    for task_id in task_ids:
-                        task_start = time.time()
-                        task = execute_command.AsyncResult(task_id)
-                        # Fetch meta once to avoid double deserialization of large results
-                        task_state = task.state
-                        task_result = task.result if task_state == "SUCCESS" else None
-                        task_elapsed = time.time() - task_start
+                for team_name, team_task_ids in task_ids.items():
+                    for task_id in team_task_ids:
+                        meta = task_metas.get(task_id) or {"status": states.PENDING, "result": None}
+                        task_state = meta.get("status", states.PENDING)
+                        task_result = meta.get("result") if task_state == states.SUCCESS else None
                         processed_count += 1
                         if processed_count % 100 == 0:
                             logger.info("Processing results: %d/%d tasks", processed_count, total_tasks)
-                        if task_elapsed > 1.0:
-                            output_len = len(task_result.get("output", "")) if isinstance(task_result, dict) else 0
-                            logger.warning(
-                                "Slow task result fetch: task %s took %.1fs (state=%s, output_len=%d)",
-                                task_id, task_elapsed, task_state, output_len,
-                            )
 
                         # Handle stuck/revoked/failed tasks via env mapping
                         if task_result is None or not isinstance(task_result, dict):
@@ -446,7 +641,6 @@ class Engine(object):
                             output=full_output[:5000],
                             command=command,
                         )
-                        cleanup_items.append(check)
                         self.db.session.add(check)
                 logger.info("Processed %d check results, committing to database", total_tasks)
                 round_end_time = datetime.now()
@@ -455,19 +649,25 @@ class Engine(object):
                 logger.info("Database commit complete")
 
             except Exception as e:
-                # We got an error while writing to db (could be normal docker stop command)
-                # but we gotta clean up any trace of the current round so when we startup
-                # again, we're at a consistent state
+                # Something blew up part way through the round (most often a
+                # database blip).  We must not leave a half-written round
+                # behind -- it would score every team as if the checks we never
+                # got to had failed -- but a transient error should not take the
+                # whole engine down mid-competition either.  So: discard the
+                # round entirely, then carry on with the next one.
                 logger.error("Error received while writing check results to db")
                 logger.exception(e)
-                logger.error("Ending round and cleaning up the db")
-                for cleanup_item in cleanup_items:
-                    try:
-                        self.db.session.delete(cleanup_item)
-                        self.db.session.commit()
-                    except Exception:
-                        pass
-                sys.exit(1)
+                logger.error("Ending round %d and cleaning up the db", self.current_round)
+                if not self._cleanup_failed_round(self.current_round):
+                    logger.critical(
+                        "Round %d could not be cleaned up and may be partially scored. "
+                        "Once the database is healthy, roll back to round %d from the admin page.",
+                        self.current_round,
+                        self.current_round,
+                    )
+                self.round_running = False
+                self._sleep_after_failed_round(round_start_time)
+                continue
 
             logger.info("Finished Round " + str(self.current_round))
             logger.info("Round Duration " + str((round_end_time - round_start_time).seconds) + " seconds")
