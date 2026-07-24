@@ -104,6 +104,7 @@ def create_app():
         api,
         auth,
         flags,
+        health,
         injects,
         notifications,
         overview,
@@ -146,6 +147,7 @@ def create_app():
     app.register_blueprint(admin.mod)
     app.register_blueprint(about.mod)
     app.register_blueprint(announcements.mod)
+    app.register_blueprint(health.mod)
 
     @app.context_processor
     def inject_version():
