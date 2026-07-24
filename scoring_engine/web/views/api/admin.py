@@ -9,19 +9,6 @@ import pytz
 from dateutil.parser import parse
 from flask import flash, jsonify, redirect, request, url_for
 from flask_login import current_user, login_required
-
-
-def _ensure_utc_aware(dt):
-    """Ensure datetime is timezone-aware in UTC. Handles both naive and aware datetimes."""
-    if dt is None:
-        return None
-    if dt.tzinfo is None:
-        # Naive datetime - assume UTC
-        return pytz.utc.localize(dt)
-    # Already aware - convert to UTC
-    return dt.astimezone(pytz.utc)
-
-
 from sqlalchemy.orm import joinedload
 from sqlalchemy.orm.exc import NoResultFound
 from sqlalchemy.sql import func
@@ -38,13 +25,14 @@ from scoring_engine.cache_helper import (
     update_services_navbar,
     update_team_stats,
 )
-from scoring_engine.events import publish_event
 from scoring_engine.celery_stats import CeleryStats
 from scoring_engine.config import config
+from scoring_engine.datetime_utils import ensure_utc_aware
 from scoring_engine.db import db
 from scoring_engine.engine.basic_check import CHECK_FAILURE_TEXT, CHECK_SUCCESS_TEXT, CHECK_TIMED_OUT_TEXT
 from scoring_engine.engine.engine import Engine
 from scoring_engine.engine.execute_command import execute_command
+from scoring_engine.events import publish_event
 from scoring_engine.models.check import Check
 from scoring_engine.models.environment import Environment
 from scoring_engine.models.inject import Inject, InjectComment, InjectRubricScore, RubricItem, Template
@@ -497,8 +485,8 @@ def admin_get_inject_templates_id(template_id):
             deliverable=template.deliverable,
             category=template.category,
             max_score=template.max_score,
-            start_time=_ensure_utc_aware(template.start_time).astimezone(pytz.timezone(config.timezone)).isoformat(),
-            end_time=_ensure_utc_aware(template.end_time).astimezone(pytz.timezone(config.timezone)).isoformat(),
+            start_time=ensure_utc_aware(template.start_time).astimezone(pytz.timezone(config.timezone)).isoformat(),
+            end_time=ensure_utc_aware(template.end_time).astimezone(pytz.timezone(config.timezone)).isoformat(),
             enabled=template.enabled,
             rubric_items=[
                 {"id": x.id, "title": x.title, "description": x.description, "points": x.points, "order": x.order}

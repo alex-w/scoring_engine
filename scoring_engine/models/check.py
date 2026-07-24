@@ -5,19 +5,8 @@ import pytz
 from sqlalchemy import Boolean, Column, DateTime, ForeignKey, Integer, Text, UnicodeText
 from sqlalchemy.orm import relationship
 
-
-def _ensure_utc_aware(dt):
-    """Ensure datetime is timezone-aware in UTC. Handles both naive and aware datetimes."""
-    if dt is None:
-        return None
-    if dt.tzinfo is None:
-        # Naive datetime - assume UTC
-        return pytz.utc.localize(dt)
-    # Already aware - convert to UTC
-    return dt.astimezone(pytz.utc)
-
-
 from scoring_engine.config import config
+from scoring_engine.datetime_utils import ensure_utc_aware
 from scoring_engine.models.base import Base
 
 
@@ -46,7 +35,7 @@ class Check(Base):
     @property
     def local_completed_timestamp(self):
         return (
-            _ensure_utc_aware(self.completed_timestamp)
+            ensure_utc_aware(self.completed_timestamp)
             .astimezone(pytz.timezone(config.timezone))
             .strftime("%Y-%m-%d %H:%M:%S %Z")
         )
