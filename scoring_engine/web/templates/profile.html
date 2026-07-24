@@ -22,6 +22,7 @@
       <div class="card-body">
         <h4 class="card-title text-center">Update Password</h4>
         <form method="POST" action="{{url_for('api.profile_update_password')}}" role="form">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
           <input type="hidden" name="user_id" value="{{current_user.id}}">
           <div class="mb-3">
             <input type="password" class="form-control" name="currentpassword" id="currentPassword" placeholder="Current Password" required>

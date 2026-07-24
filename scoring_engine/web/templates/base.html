@@ -13,12 +13,35 @@
   <meta charset="utf-8">
   <meta http-equiv="X-UA-Compatible" content="IE=edge">
   <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="csrf-token" content="{{ csrf_token() }}">
   {% block head %}
   <title>Scoring Engine - {% block title %}{% endblock %}</title>
   <script src="{{ url_for('static', filename='vendor/js/jquery.min.js') }}"></script>
   <script src="{{ url_for('static', filename='vendor/js/bootstrap.bundle.min.js') }}"></script>
   <script src="{{ url_for('static', filename='vendor/js/utils.js') }}"></script>
   <script src="{{ url_for('static', filename='vendor/js/sse.js') }}"></script>
+  <script>
+    // CSRF: every state-changing request must carry the token.
+    //
+    // window.CSRF_TOKEN is the canonical source for any hand-rolled request
+    // (Dropzone, raw XHR, fetch).  jQuery calls are covered automatically by
+    // the ajaxSend hook below -- ajaxSend is used rather than
+    // $.ajaxSetup({beforeSend}) because a per-call beforeSend would silently
+    // override ajaxSetup and strip the header.
+    //
+    // This lives at the end of the head block (rather than after it) so that
+    // child templates that pull the block in via super() get the hook
+    // installed before any script they add of their own.
+    window.CSRF_TOKEN = document.querySelector('meta[name="csrf-token"]').getAttribute('content');
+    (function () {
+      var SAFE = /^(GET|HEAD|OPTIONS|TRACE)$/i;
+      $(document).ajaxSend(function (event, jqxhr, settings) {
+        if (!SAFE.test(settings.type || 'GET') && !settings.crossDomain) {
+          jqxhr.setRequestHeader('X-CSRFToken', window.CSRF_TOKEN);
+        }
+      });
+    })();
+  </script>
   {% endblock %}
   <link href="{{ url_for('static', filename='vendor/css/bootstrap.min.css') }}" rel="stylesheet">
   <link href="{{ url_for('static', filename='vendor/css/bootstrap-icons.min.css') }}" rel="stylesheet">

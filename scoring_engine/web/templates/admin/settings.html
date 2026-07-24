@@ -10,6 +10,7 @@
 {% block admincontent %}
 <div class="pt-3">
   <form method="POST" action="{{ url_for('api.admin_update_target_round_time') }}" role="form">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
     <div class="mb-3 row align-items-center">
       <label for="target_round_time" class="col-sm-3 col-form-label text-sm-end">Target Round Time (s)</label>
       <div class="col-sm-3">
@@ -26,6 +27,7 @@
   </form>
 
   <form method="POST" action="{{ url_for('api.admin_update_worker_refresh_time') }}" role="form">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
     <div class="mb-3 row align-items-center">
       <label for="worker_refresh_time" class="col-sm-3 col-form-label text-sm-end">Worker Refresh Time (s)</label>
       <div class="col-sm-3">
@@ -44,6 +46,7 @@
   <h3 class="section-header">Page Content</h3>
 
   <form method="POST" action="{{ url_for('api.admin_update_about_page_content') }}" role="form">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
     <div class="mb-3 row">
       <label for="about_page_content" class="col-sm-3 col-form-label text-sm-end">About Page Content</label>
       <div class="col-sm-9">

@@ -68,6 +68,8 @@ Configuration Keys
      - The port of the redis server
    * - redis_password
      - The password used to connect to redis (if no password, leave empty)
+   * - session_cookie_secure
+     - A boolean marking the session and remember-me cookies "Secure" so browsers only send them over HTTPS. The bundled docker compose stack terminates TLS at nginx and sets this to True. Leave it False for a plain-HTTP dev run, otherwise the browser drops the session cookie and logins silently fail. (default: False)
    * - sla_enabled
      - A boolean to enable/disable SLA penalties for consecutive service failures
    * - sla_penalty_threshold

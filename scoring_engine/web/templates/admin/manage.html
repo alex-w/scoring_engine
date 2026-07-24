@@ -15,6 +15,7 @@
         <div class="card-body">
           <h5 class="card-title text-center">Update Password</h5>
           <form method="POST" action="{{ url_for('api.admin_update_password') }}" role="form">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
             <div class="mb-3">
               <select class="form-select" name="user_id" id="userSelect">
                 {% for user in users %}
@@ -36,6 +37,7 @@
         <div class="card-body">
           <h5 class="card-title text-center">Add User</h5>
           <form method="POST" action="{{ url_for('api.admin_add_user') }}" role="form">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
             <div class="mb-3">
               <input type="text" class="form-control" name="username" id="userUsername" placeholder="Username" required>
             </div>
@@ -60,6 +62,7 @@
         <div class="card-body">
           <h5 class="card-title text-center">Add Team</h5>
           <form method="POST" action="{{ url_for('api.admin_add_team') }}" role="form">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
             <div class="mb-3">
               <input type="text" class="form-control" name="name" id="team" placeholder="Team Name" required>
             </div>

@@ -158,6 +158,17 @@ class ConfigLoader(object):
 
         self.redis_password = self.parse_sources("redis_password", self.parser["OPTIONS"]["redis_password"])
 
+        # Mark the session/remember-me cookies Secure so browsers only ever send
+        # them over HTTPS.  Correct for the shipped docker deployment (nginx
+        # terminates TLS and 301s port 80 to 443) but it must stay off for a
+        # plain-HTTP dev run, otherwise the browser drops the cookie and login
+        # silently fails.  Defaults to False so an unconfigured checkout works.
+        self.session_cookie_secure = self.parse_sources(
+            "session_cookie_secure",
+            self.parser["OPTIONS"].get("session_cookie_secure", "false").lower() == "true",
+            "bool",
+        )
+
         # SLA Penalty Configuration
         self.sla_enabled = self.parse_sources(
             "sla_enabled",
