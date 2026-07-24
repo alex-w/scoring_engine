@@ -95,8 +95,21 @@
             return '<td>' + value + medal + '</td>';
         }
 
-        if (rowLabel === 'SLA Penalties' || rowLabel === 'Up/Down Ratio') {
-            return '<td>' + value + '</td>';
+        if (rowLabel === 'Up/Down Ratio') {
+            var up = (value && value.up) || 0;
+            var down = (value && value.down) || 0;
+            return '<td>'
+                + '<span class="text-success">' + up + ' <i class="bi bi-arrow-up"></i></span> / '
+                + '<span class="text-danger">' + down + ' <i class="bi bi-arrow-down"></i></span>'
+                + '</td>';
+        }
+
+        if (rowLabel === 'SLA Penalties') {
+            var penalty = parseFloat(value) || 0;
+            if (penalty > 0) {
+                return '<td><span class="text-danger">-' + penalty + '</span></td>';
+            }
+            return '<td>0</td>';
         }
 
         // Service status cell
