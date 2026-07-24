@@ -3,7 +3,7 @@ import html
 import uuid
 
 import pytz
-from sqlalchemy import Column, DateTime, Enum, ForeignKey, Integer, PickleType, String, UniqueConstraint
+from sqlalchemy import JSON, Column, DateTime, Enum, ForeignKey, Integer, String, UniqueConstraint
 
 
 def _ensure_utc_aware(dt):
@@ -32,7 +32,10 @@ class Agent(Base):
     id = Column(Integer, primary_key=True, autoincrement=True)
     type = Column(Enum(FlagTypeEnum), nullable=False)
     platform = Column(Enum(Platform), nullable=False)
-    data = Column(PickleType, nullable=False)
+    # JSON rather than PickleType: pickle in the DB is a deserialization risk and
+    # cannot be queried or migrated. SQLAlchemy's generic JSON type renders as a
+    # native JSON column on MySQL/MariaDB and as TEXT-with-JSON-serialization on SQLite.
+    data = Column(JSON, nullable=False)
     start_time = Column(DateTime(timezone=True), nullable=False)
     end_time = Column(DateTime(timezone=True), nullable=False)
 
