@@ -846,34 +846,6 @@ def admin_post_inject_templates():
         return {"status": "Unauthorized"}, 403
 
 
-# @mod.route("/api/admin/injects/templates/export")
-# @login_required
-# def admin_export_inject_templates():
-#     if current_user.is_white_team:
-#         data = []
-#         templates = db.session.query(Template).all()
-#         for template in templates:
-#             data.append(
-#                 dict(
-#                     id=template.id,
-#                     title=template.title,
-#                     scenario=template.scenario,
-#                     deliverable=template.deliverable,
-#                     start_time=template.start_time,
-#                     end_time=template.end_time,
-#                     enabled=template.enabled,
-#                     rubric=[
-#                         {"id": x.id, "value": x.value, "deliverable": x.deliverable}
-#                         for x in template.rubric
-#                     ],
-#                     # TODO - export teams
-#                 )
-#             )
-#         return jsonify(data=data)
-#     else:
-#         return {"status": "Unauthorized"}, 403
-
-
 # TODO - Generate injects from templates
 @mod.route("/api/admin/injects/templates/import", methods=["POST"])
 @login_required
@@ -1114,16 +1086,6 @@ def admin_update_template():
                     return jsonify({"status": "Updated Property Information"})
             return jsonify({"error": "Template Not Found"})
     return jsonify({"error": "Incorrect permissions"})
-
-
-# @mod.route("/api/admin/injects/team/<team_id>")
-# @login_required
-# def admin_get_team_injects(team_id):
-#     if current_user.is_white_team:
-#         injects = db.session.query(Inject).filter(team_id == team_id).all()
-#         return jsonify(data=injects)
-#     else:
-#         return {"status": "Unauthorized"}, 403
 
 
 @mod.route("/api/admin/get_teams")

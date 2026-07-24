@@ -16,15 +16,23 @@ Scoring Engine aims to be the premier open-source platform for Red/White/Blue te
 - **GitHub Project**: Active progress tracking at [Scoring Engine Roadmap](https://github.com/orgs/scoringengine/projects/)
 - **GitHub Issues**: Individual tasks linked to roadmap items
 
-## Current State (v1.1.0)
+## Current State (v2.1.0)
 
 The project is **production-ready** with:
-- 31 service check types covering common network services
+- 28 service check types covering common network services (auto-discovered from `scoring_engine/checks/`, including the red team agent check)
 - Distributed task execution via Celery workers
 - Web interface for scoreboard and team management
+- Alembic-based database migrations (`bin/migrate`)
+- Real-time updates over Server-Sent Events (`scoring_engine/sse_server.py`)
+- Competition announcement feed with per-team/role audience targeting
+- Inject workflow with templates, scored rubrics, and file attachments
+- White team admin tooling: check dry-run and round rollback
 - Multi-architecture Docker support (AMD64, ARM64)
 - Comprehensive airgapped deployment support
 - CI/CD pipeline with automated testing and image publishing
+
+> Checkbox state below is reconciled against the code, not against intent. An item
+> is only checked when the shipped implementation can be pointed at.
 
 ---
 
@@ -32,11 +40,18 @@ The project is **production-ready** with:
 
 ### Database & Data Management
 
-- [ ] **Implement database migrations with Alembic**
-  - Add Flask-Migrate integration
-  - Create initial migration from current schema
-  - Document migration workflow for production deployments
-  - Enable schema changes without data loss
+- [x] **Implement database migrations with Alembic**
+  - Alembic wired to the Flask app context (`alembic/env.py`), versions in `alembic/versions/`
+  - `bin/migrate` runs pending migrations; `bin/migrate --check` exits 1 when any are pending
+  - Fresh installs `create_all()` then stamp head; existing databases upgrade in place
+  - Helpers in `scoring_engine/db.py`: `init_db()`, `run_migrations()`, `stamp_alembic_head()`
+  - Workflow documented in `CLAUDE.md`
+  - Note: implemented with Alembic directly, not Flask-Migrate
+
+- [x] **Round rollback for competition data**
+  - `POST /api/admin/rollback` deletes rounds, checks, and KB task manifests from a round onwards
+  - Dry-run preview of what would be deleted, plus an explicit `confirm` flag on the destructive call
+  - White team only, driven from the admin settings page
 
 - [ ] **Optimize database query performance**
   - Address remaining N+1 query issues in API endpoints
@@ -67,7 +82,7 @@ The project is **production-ready** with:
   - Monitoring and alerting setup
 
 - [ ] **Improve check documentation**
-  - Document all 31 check types with examples
+  - Document all 28 check types with examples (20 of 28 have a page under `docs/source/checks/`)
   - Provide competition.yaml templates for common scenarios
   - Create check development tutorial
 
@@ -143,11 +158,15 @@ The project is **production-ready** with:
 
 ### Competition Management
 
-- [ ] **Enhance inject system**
-  - Implement rubric updates functionality
-  - Add inject generation from templates
-  - Support file attachments for injects
-  - Improve inject workflow documentation
+- [x] **Enhance inject system**
+  - Rubric updates: `RubricItem` / `InjectRubricScore` in `scoring_engine/models/inject.py`, edited in place via `PUT /api/admin/injects/templates/<id>` so existing scores survive
+  - Inject generation from templates: `Template` model plus create/update/delete/import endpoints that fan a template out to selected teams
+  - File attachments: `InjectFile` model with upload, list, download, preview, and delete endpoints
+  - Still open: inject workflow documentation (nothing under `docs/` covers it yet)
+
+- [x] **Service check dry-run**
+  - `POST /api/admin/check/dry_run` runs a check through a Celery worker without recording a result
+  - Lets white team validate service configuration before a round scores it
 
 - [ ] **Incident response reporting** ([#781](https://github.com/scoringengine/scoringengine/issues/781))
   - Enable submission of incident response reports
@@ -177,11 +196,17 @@ The project is **production-ready** with:
   - Knowledge base accessible to authenticated teams
   - Team-specific info, credentials, network details
   - White team editable (HTML/Markdown support)
+  - Not started. `scoring_engine/models/kb.py` is unrelated despite the name — it is an
+    engine-internal per-round Celery task manifest (`name="task_ids"`) used only by
+    `engine/engine.py` and the admin rollback endpoint. There is no wiki view, template, or API.
 
-- [ ] **Competition announcement feed** ([#783](https://github.com/scoringengine/scoringengine/issues/783))
-  - Real-time updates from competition organizers
-  - Public announcement system during competition
-  - Known issues and status updates
+- [x] **Competition announcement feed** ([#783](https://github.com/scoringengine/scoringengine/issues/783))
+  - `Announcement` model with audience targeting (`global`, `all_blue`, `all_red`, `team:<id>`, `teams:1,3,5`), pinning, activation, and expiry
+  - `/api/announcements` and `/api/announcements/count` for teams; full admin CRUD under `/api/admin/announcements`
+  - Team-facing `announcements.html` page and an admin management page
+  - Unread badge in the navbar refreshes on the `round_complete` SSE event, with polling fallback
+  - Known gap: no `announcement` event is published when white team posts one, so a new
+    announcement is not pushed out until the next round completes or the poll fires
 
 ### New Check Types
 
@@ -209,11 +234,12 @@ The project is **production-ready** with:
 
 ### User Experience
 
-- [ ] **Real-time updates**
-  - WebSocket-based scoreboard updates
-  - Live check result streaming
-  - Notification push updates
-  - Reduce polling overhead
+- [x] **Real-time updates**
+  - Implemented with Server-Sent Events rather than WebSockets
+  - `scoring_engine/events.py` publishes to a Redis pub/sub channel from the engine and web tiers
+  - `scoring_engine/sse_server.py` is a gevent SSE server on port 8001 that filters events per client role/team
+  - `static/vendor/js/sse.js` is an `EventSource` client with polling fallback, loaded from `base.html`
+  - Events published today: `round_complete`, `inject_update`, `settings_changed`
 
 - [ ] **Service uptime dashboard** ([#804](https://github.com/scoringengine/scoringengine/issues/804))
   - Monitoring page showing uptime percentage per host
@@ -343,6 +369,7 @@ Items are prioritized based on:
 
 | Version | Date | Changes |
 |---------|------|---------|
+| 1.2 | 2026-07-24 | Reconciled against the code: checked Alembic migrations, round rollback, inject enhancements, check dry-run, announcement feed, and real-time updates; corrected check count 31 → 28 and Current State to v2.1.0; confirmed the team wiki (#782) is still unstarted |
 | 1.1 | 2025-01-20 | Added community-requested features from GitHub issues |
 | 1.0 | 2025-01-20 | Initial roadmap creation |
 

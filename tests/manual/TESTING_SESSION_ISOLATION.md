@@ -2,6 +2,10 @@
 
 This guide helps you verify that the Flask-SQLAlchemy migration properly isolates user sessions and prevents data contamination.
 
+> These are manual, operator-run procedures — not part of the automated pytest
+> suite. See [README.md](README.md) for prerequisites and why pytest skips this
+> directory.
+
 ## What We're Testing For
 
 The migration from a global `scoped_session` to Flask-SQLAlchemy's per-request sessions should prevent:
@@ -52,11 +56,11 @@ with app.app_context():
 ### 3. Run Automated Tests
 
 ```bash
-# Option A: Python script (more comprehensive)
-python test_concurrent_users.py
+# Option A: Python script (more comprehensive) - needs `requests` installed
+python tests/manual/test_concurrent_users.py
 
 # Option B: Simple bash script
-./test_simple_concurrent.sh
+./tests/manual/test_simple_concurrent.sh
 ```
 
 ### 4. Manual Browser Testing
