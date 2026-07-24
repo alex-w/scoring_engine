@@ -21,6 +21,16 @@ Design constraints:
 * They are unauthenticated, so responses must not leak internal detail.  Each
   dependency is reported only as ``healthy`` or ``unhealthy``; hostnames,
   credentials, driver versions and exception text stay in the server log.
+
+Exposure (see ``docker/nginx/files/web.conf``):
+
+* ``/health`` is routed on the public vhost.  A static 200 tells a caller
+  nothing they do not already learn from loading any other page.
+* ``/health/ready`` is **not**: nginx answers it with a 404 before the request
+  reaches this module.  "Is the scoring database up?" is reconnaissance during
+  a competition -- it tells a red team when their activity is least likely to
+  be recorded.  The container healthcheck reaches this view over uWSGI's
+  loopback-only HTTP socket instead, bypassing nginx entirely.
 """
 
 import logging

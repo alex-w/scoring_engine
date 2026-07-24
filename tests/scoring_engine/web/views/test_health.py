@@ -1,6 +1,8 @@
 import pytest
+from flask_caching.backends.simplecache import SimpleCache
 from sqlalchemy.exc import OperationalError
 
+from scoring_engine.cache import cache
 from scoring_engine.db import db
 from scoring_engine.web.views import health
 
@@ -19,6 +21,24 @@ def _patch_cache_backend(monkeypatch, redis_client):
         cache = FakeBackend()
 
     monkeypatch.setattr(health, "cache", FakeCache())
+
+
+@pytest.fixture()
+def working_cache_backend(app, monkeypatch):
+    """Give the app a cache backend that actually caches, for one test.
+
+    The test config uses ``cache_type = null``.  With ``NullCache`` the
+    ``@cache.cached`` decorator stores nothing and every call is a miss, so any
+    "the response is not cached" assertion passes whether or not the view is
+    decorated -- the test cannot fail.  ``SimpleCache`` is in-process (no Redis
+    needed) and caches for real, which is what gives those assertions teeth.
+
+    ``Cache.cache`` resolves the backend per request via
+    ``current_app.extensions["cache"][self]``, so swapping that entry is enough
+    to change the behaviour of an already-applied ``@cache.cached`` decorator.
+    """
+    monkeypatch.setitem(app.extensions["cache"], cache, SimpleCache())
+    return app.extensions["cache"][cache]
 
 
 class TestHealth:
@@ -70,12 +90,78 @@ class TestHealth:
         resp = self.client.get("/health/ready")
         assert "no-store" in resp.headers["Cache-Control"]
 
-    def test_readiness_is_not_served_from_cache(self, monkeypatch):
-        """A stale 200 would keep a broken instance in rotation."""
+    @pytest.mark.parametrize("path", ["/health/ready/", "/HEALTH/READY", "/health/ready/x"])
+    def test_readiness_has_no_alternate_spelling(self, path):
+        """nginx hides /health/ready from the public vhost with an exact-match
+        location (``location = /health/ready``, see docker/nginx/files/web.conf).
+
+        Anything nginx does not match exactly falls through to the catch-all and
+        does reach the app, so the app must not answer readiness under a second
+        spelling -- that would be a trivial bypass of the nginx block.
+        """
+        assert self.client.get(path).status_code == 404
+
+    def test_the_caching_harness_can_actually_detect_a_cached_view(self, app, working_cache_backend):
+        """Guard for the guard.
+
+        ``test_readiness_is_not_served_from_cache`` is only meaningful if
+        ``@cache.cached`` really caches under ``working_cache_backend``.  Prove
+        that here on a throwaway view: if this ever stops holding, the tests
+        below silently stop testing anything and this one fails loudly instead.
+        """
+        calls = []
+
+        @cache.cached(timeout=60, key_prefix="health-test-canary")
+        def canary():
+            calls.append(1)
+            return "call-{0}".format(len(calls))
+
+        with app.test_request_context("/health/ready"):
+            first = canary()
+            second = canary()
+
+        assert first == "call-1"
+        assert second == "call-1", "backend under test is not caching -- the cache tests are toothless"
+        assert len(calls) == 1
+
+    def test_readiness_is_not_served_from_cache(self, monkeypatch, working_cache_backend):
+        """A stale 200 would keep a broken instance in rotation.
+
+        Runs against a real (in-process) cache backend, so wrapping ``ready()``
+        in ``@cache.cached`` would make the second request replay the first
+        request's 200 and fail this test.
+        """
         assert self.client.get("/health/ready").status_code == 200
 
         monkeypatch.setattr(db.session, "execute", self._db_failure)
-        assert self.client.get("/health/ready").status_code == 503
+        resp = self.client.get("/health/ready")
+        assert resp.status_code == 503
+        assert resp.json["checks"]["database"] == "unhealthy"
+
+    def test_liveness_is_not_served_from_cache(self, monkeypatch, working_cache_backend):
+        """Liveness must reflect the process, not a stored copy of an old answer.
+
+        The liveness body is a constant, so vary the constant between the two
+        requests: a cached response would replay the first one.
+        """
+        assert self.client.get("/health").json == {"status": "healthy"}
+
+        monkeypatch.setattr(health, "HEALTHY", "second-call")
+        assert self.client.get("/health").json == {"status": "second-call"}
+
+    @pytest.mark.parametrize("endpoint", ["health.health", "health.ready"])
+    def test_health_views_are_not_wrapped_by_flask_caching(self, app, endpoint):
+        """Structural check, independent of which backend is configured.
+
+        ``flask_caching``'s ``cached``/``memoize`` decorators attach ``uncached``
+        and ``make_cache_key`` to the function they wrap.  Their absence is
+        proof the view runs on every request, no matter how the deployment has
+        ``cache_type`` set.
+        """
+        view = app.view_functions[endpoint]
+        assert not hasattr(view, "uncached")
+        assert not hasattr(view, "make_cache_key")
+        assert not hasattr(view, "cache_timeout")
 
     # ------------------------------------------------------------------
     # Readiness -- failure paths
