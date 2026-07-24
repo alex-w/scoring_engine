@@ -87,6 +87,10 @@ services:
       - SCORINGENGINE_EXAMPLE
       - SCORINGENGINE_OVERWRITE_DB
       - SCORINGENGINE_VERSION
+      # Flask session signing key -- see .env.example. Every process that builds
+      # the Flask app needs the same value, otherwise sessions break between
+      # them and on restart.
+      - SCORINGENGINE_SECRET_KEY
   engine:
     image: scoringengine/engine
     build:
@@ -112,6 +116,7 @@ services:
     environment:
       - SCORINGENGINE_EXAMPLE
       - SCORINGENGINE_VERSION
+      - SCORINGENGINE_SECRET_KEY
   worker:
     image: scoringengine/worker
     build:
@@ -165,6 +170,9 @@ services:
       - check_outputs:/var/check_outputs
     environment:
       - SCORINGENGINE_VERSION
+      # Flask session signing key. Required to scale this service past one
+      # replica and to keep users logged in across restarts. See .env.example.
+      - SCORINGENGINE_SECRET_KEY
 
 volumes:
   check_outputs:

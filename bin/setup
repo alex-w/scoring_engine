@@ -19,7 +19,12 @@ from scoring_engine.models.setting import Setting
 from scoring_engine.models.team import Team
 from scoring_engine.models.announcement import Announcement
 from scoring_engine.version import version
-from scoring_engine.web import create_app
+from scoring_engine.web import (
+    MISSING_SECRET_KEY_SETUP_WARNING,
+    SECRET_KEY_LOCATION_HINT,
+    create_app,
+    secret_key_is_configured,
+)
 
 parser = optparse.OptionParser()
 parser.add_option("--overwrite-db", action="store_true", default=False)
@@ -43,6 +48,24 @@ if "SCORINGENGINE_OVERWRITE_DB" in os.environ and os.environ["SCORINGENGINE_OVER
     options.overwrite_db = os.environ["SCORINGENGINE_OVERWRITE_DB"] == "true"
 
 logger.info("Starting Setup v.{0}".format(version))
+
+# Flask session signing key check.
+#
+# We deliberately do NOT write a generated key to disk here. bin/setup does not
+# own the config file today (engine.conf is baked into each container image at
+# build time, or hand-edited on manual installs), and under docker compose this
+# script runs in a short-lived bootstrap container whose filesystem is not
+# shared with the web containers -- a key persisted here would never reach the
+# process that actually signs session cookies.
+#
+# We also do NOT generate a key and print it. This output goes to the container
+# log stream, which is readable by anyone who can run `docker logs` and is often
+# forwarded to a log aggregator; a session signing key emitted there is
+# compromised on arrival. Instead we tell the operator how to generate one
+# locally and where to put it.
+if not secret_key_is_configured():
+    logger.warning(MISSING_SECRET_KEY_SETUP_WARNING)
+    logger.warning(SECRET_KEY_LOCATION_HINT)
 
 # Create Flask app for app context
 app = create_app()

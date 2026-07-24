@@ -1,5 +1,5 @@
 import logging
-import os
+import secrets
 
 from flask import Flask
 from flask_login import LoginManager
@@ -7,9 +7,66 @@ from flask_login import LoginManager
 from scoring_engine.cache import agent_cache, cache
 from scoring_engine.config import config
 from scoring_engine.db import db
+from scoring_engine.logger import logger
 from scoring_engine.version import version_info
 
-SECRET_KEY = os.urandom(128)
+# Number of bytes of entropy used for the throwaway key generated when no
+# secret_key has been configured.  token_hex returns twice this many chars.
+GENERATED_SECRET_KEY_BYTES = 64
+
+# How an operator should produce a key.  We print the *command*, never a live
+# key: logs are widely readable and routinely shipped to aggregators, so a
+# generated secret emitted to stdout should be considered burned the moment it
+# is printed.  Generating it locally keeps it out of the log stream entirely.
+SECRET_KEY_GENERATION_HINT = 'Generate one with: python -c "import secrets; print(secrets.token_hex(64))"'
+
+SECRET_KEY_LOCATION_HINT = (
+    "Then set SCORINGENGINE_SECRET_KEY in your .env file (docker) or 'secret_key' in "
+    "engine.conf (manual install). Do not paste it into a shell command or a log."
+)
+
+MISSING_SECRET_KEY_WARNING = (
+    "No secret_key is configured, so a random Flask session key was generated for this "
+    "process. Sessions will NOT survive a restart (every user is logged out) and will NOT "
+    "work across more than one web process or container, which blocks horizontal scaling. "
+    "Set a long, random, stable value via the SCORINGENGINE_SECRET_KEY environment "
+    "variable or 'secret_key' in engine.conf. " + SECRET_KEY_GENERATION_HINT
+)
+
+# Shown by bin/setup, which runs before the web app and is the natural place to
+# catch this while there is still time to fix it.
+MISSING_SECRET_KEY_SETUP_WARNING = (
+    "No secret_key is configured. Until one is set, every web restart logs all users out "
+    "and sessions cannot be shared between web processes/containers. " + SECRET_KEY_GENERATION_HINT
+)
+
+
+def secret_key_is_configured():
+    """Return whether a usable ``secret_key`` is present in the configuration.
+
+    Used by ``bin/setup`` so the check and the web app agree on what counts as
+    configured (a whitespace-only value does not).
+    """
+    return bool((getattr(config, "secret_key", "") or "").strip())
+
+
+def get_secret_key():
+    """Return the Flask session signing key.
+
+    The value comes from the normal configuration precedence implemented in
+    :mod:`scoring_engine.config_loader` -- ``SCORINGENGINE_SECRET_KEY`` in the
+    environment, then ``secret_key`` in ``engine.conf``.
+
+    When nothing is configured the application still boots: a random key is
+    generated and a loud warning is logged.  No hardcoded fallback key is
+    shipped on purpose -- a fixed default would let anyone forge session
+    cookies for any deployment that never overrode it.
+    """
+    if secret_key_is_configured():
+        return config.secret_key.strip()
+
+    logger.warning(MISSING_SECRET_KEY_WARNING)
+    return secrets.token_hex(GENERATED_SECRET_KEY_BYTES)
 
 
 def create_app():
@@ -17,7 +74,7 @@ def create_app():
 
     app.config.update(DEBUG=config.debug)
     app.config.update(UPLOAD_FOLDER=config.upload_folder)
-    app.secret_key = SECRET_KEY
+    app.secret_key = get_secret_key()
 
     # Static file caching: 1 hour in debug mode, 1 week in production
     # Browsers will cache CSS/JS/images and not re-request until max-age expires
