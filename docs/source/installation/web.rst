@@ -53,6 +53,8 @@ Modify configuration
 
   vi /home/engine/scoring_engine/src/engine.conf
 
+.. important:: Set ``secret_key`` to a long random value here, and use the *same* value on every web host. If it is left empty the web app generates a throwaway key at startup, which logs every user out on each restart and prevents running more than one web process. Generate one with ``python -c "import secrets; print(secrets.token_hex(64))"``. See :doc:`../configuration`.
+
 Install uwsgi
 ^^^^^^^^^^^^^
 ::

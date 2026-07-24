@@ -1,6 +1,7 @@
 #!/usr/bin/env python
 import optparse
 import os
+import secrets
 from datetime import datetime, timedelta
 from random import choice, randint, sample
 
@@ -43,6 +44,26 @@ if "SCORINGENGINE_OVERWRITE_DB" in os.environ and os.environ["SCORINGENGINE_OVER
     options.overwrite_db = os.environ["SCORINGENGINE_OVERWRITE_DB"] == "true"
 
 logger.info("Starting Setup v.{0}".format(version))
+
+# Flask session signing key check.
+#
+# We deliberately do NOT write a generated key to disk here. bin/setup does not
+# own the config file today (engine.conf is baked into each container image at
+# build time, or hand-edited on manual installs), and under docker compose this
+# script runs in a short-lived bootstrap container whose filesystem is not
+# shared with the web containers -- a key persisted here would never reach the
+# process that actually signs session cookies. So instead we hand the operator a
+# ready-to-use value and tell them exactly where to put it.
+if not (config.secret_key or "").strip():
+    logger.warning(
+        "No secret_key is configured. Until one is set, every web restart logs all users "
+        "out and sessions cannot be shared between web processes/containers."
+    )
+    logger.warning(
+        "Set it in your .env file (docker) or engine.conf (manual install) before starting "
+        "the web app. A strong value you can use:"
+    )
+    logger.warning("    SCORINGENGINE_SECRET_KEY=%s", secrets.token_hex(64))
 
 # Create Flask app for app context
 app = create_app()

@@ -58,6 +58,8 @@ Configuration Keys
      - Local timezone of the competition
    * - debug
      - Determines wether or not the engine should be run in debug mode (useful for development). The worker will also display output from all checks.
+   * - secret_key
+     - The key Flask uses to sign session cookies. Must be a long random value and must be identical across restarts and across every web process/container. See `Session Secret Key`_.
    * - db_uri
      - Database connection URI
    * - cache_type
@@ -90,3 +92,65 @@ Configuration Keys
      - Round number when late phase begins (default: 50)
    * - dynamic_scoring_late_multiplier
      - Points multiplier for late phase (default: 0.5)
+   * - inject_scores_visible
+     - A boolean to show inject scores on the public scoreboard (default: False, private grading)
+
+
+Session Secret Key
+------------------
+
+The web application signs session cookies with ``secret_key``. It is the only
+configuration key that is security critical *and* has no default, so it is worth
+calling out separately.
+
+**Why it must be set**
+
+* If the key changes, every existing session cookie becomes invalid and all
+  users -- including white team -- are logged out. A key that is generated at
+  startup therefore logs everyone out on every restart, redeploy, or crash loop.
+* If two web processes or containers hold different keys, a session issued by
+  one is rejected by the other. That makes it impossible to run more than one
+  web replica behind a load balancer, i.e. it blocks horizontal scaling
+  entirely.
+
+**Why there is no default**
+
+No key is shipped in ``engine.conf.inc``. A fixed default that operators forget
+to change would let anyone who has read the source forge a session cookie for
+any team, including white team. An unset key is a warning; a shared default key
+would be a vulnerability.
+
+**Generating a key**
+
+::
+
+  python -c "import secrets; print(secrets.token_hex(64))"
+
+**Setting it**
+
+Docker (recommended -- ``docker/engine.conf.inc`` is baked into the image at
+build time, so use the environment instead):
+
+::
+
+  # in .env, next to the other credentials
+  SCORINGENGINE_SECRET_KEY=<paste the generated value>
+
+The ``web``, ``engine``, and ``bootstrap`` services in ``docker-compose.yml``
+already pass this variable through.
+
+Manual install, in ``engine.conf``:
+
+::
+
+  secret_key = <paste the generated value>
+
+**If it is not set**
+
+The application still starts. It generates a random key for that process and
+logs a warning explaining that sessions will not survive a restart and cannot
+scale beyond one process. ``bin/setup`` performs the same check and prints a
+ready-to-use generated value. This is fine for local development and never fine
+for a competition.
+
+.. warning:: Treat the key like a password. Do not commit it, and rotate it if it leaks -- rotating logs everyone out, which is the intended effect.

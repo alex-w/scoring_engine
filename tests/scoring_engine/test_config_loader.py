@@ -2,6 +2,8 @@ import os
 
 from scoring_engine.config_loader import ConfigLoader
 
+TESTS_CONF = os.path.join(os.path.dirname(os.path.abspath(__file__)), "engine.conf.inc")
+
 
 class TestConfigLoader(object):
     def setup_method(self):
@@ -61,6 +63,9 @@ class TestConfigLoader(object):
     def test_redis_password(self):
         assert self.config.redis_password == "testpass"
 
+    def test_secret_key(self):
+        assert self.config.secret_key == "testsecretkey"
+
     def test_parse_sources_default(self):
         assert self.config.parse_sources("testname", "abcdefg") == "abcdefg"
 
@@ -87,6 +92,43 @@ class TestConfigLoader(object):
     def test_parse_sources_str_environment(self):
         os.environ["SCORINGENGINE_REDIS_HOST"] = "127.0.0.1"
         assert self.config.parse_sources("redis_host", "1.2.3.4") == "127.0.0.1"
+
+
+class TestSecretKeyConfig(object):
+    """secret_key follows the standard env var -> config file -> default chain."""
+
+    def _conf_without_secret_key(self, tmp_path):
+        """Copy the test config, dropping the secret_key line."""
+        with open(TESTS_CONF) as fh:
+            lines = [line for line in fh if not line.startswith("secret_key")]
+        target = tmp_path / "no_secret_key.inc"
+        target.write_text("".join(lines))
+        # ConfigLoader joins the location onto its own directory, but an
+        # absolute path wins, so this loads exactly the file we just wrote.
+        return str(target)
+
+    def test_read_from_config_file(self, monkeypatch):
+        monkeypatch.delenv("SCORINGENGINE_SECRET_KEY", raising=False)
+        config = ConfigLoader(location=TESTS_CONF)
+        assert config.secret_key == "testsecretkey"
+
+    def test_environment_variable_overrides_file(self, monkeypatch):
+        monkeypatch.setenv("SCORINGENGINE_SECRET_KEY", "from-the-environment")
+        config = ConfigLoader(location=TESTS_CONF)
+        assert config.secret_key == "from-the-environment"
+
+    def test_defaults_to_empty_when_absent(self, monkeypatch, tmp_path):
+        """An absent secret_key must not raise and must not get a shipped default."""
+        monkeypatch.delenv("SCORINGENGINE_SECRET_KEY", raising=False)
+        config = ConfigLoader(location=self._conf_without_secret_key(tmp_path))
+        assert config.secret_key == ""
+
+    def test_no_hardcoded_key_in_example_config(self, monkeypatch):
+        """engine.conf.inc must never ship an actual key value."""
+        monkeypatch.delenv("SCORINGENGINE_SECRET_KEY", raising=False)
+        repo_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+        config = ConfigLoader(location=os.path.join(repo_root, "engine.conf.inc"))
+        assert config.secret_key == ""
 
 
 def test_default_uses_example_config():

@@ -17,6 +17,9 @@ check_output_folder = /tmp/test_check_outputs
 
 debug = False
 
+# Test-only value. Never use this in a real deployment.
+secret_key = testsecretkey
+
 # SQLite
 db_uri = sqlite:////tmp/test_engine.db?check_same_thread=False
 

@@ -18,6 +18,24 @@ check_output_folder = /var/check_outputs
 
 debug = False
 
+# Flask session signing key for the web application.
+#
+# MUST be set to a long, random value and MUST stay the same across restarts
+# and across every web process/container:
+#   * If it changes, all session cookies become invalid and every user is
+#     logged out.
+#   * If two web processes/containers hold different keys, a session created
+#     by one is rejected by the other, so you cannot run more than one web
+#     replica behind a load balancer.
+#
+# Left empty on purpose -- no default key is shipped, because a fixed default
+# would let anyone forge session cookies. If it is empty the web app still
+# starts, but generates a throwaway key and logs a warning.
+#
+# Generate one with:
+#   python -c "import secrets; print(secrets.token_hex(64))"
+secret_key =
+
 # SQLite
 db_uri = sqlite:////tmp/engine.db?check_same_thread=False
 # MySQL

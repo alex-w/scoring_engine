@@ -148,6 +148,17 @@ class ConfigLoader(object):
             self.parser["OPTIONS"].get("check_output_folder", "/var/check_outputs"),
         )
 
+        # Flask session signing key used by the web application.
+        #
+        # There is deliberately no default value here: shipping a fixed key
+        # would let anyone forge session cookies against every deployment that
+        # never changed it.  An empty string means "not configured", and the
+        # web app generates a random key at startup (and warns loudly).
+        self.secret_key = self.parse_sources(
+            "secret_key",
+            self.parser["OPTIONS"].get("secret_key", ""),
+        )
+
         self.db_uri = self.parse_sources("db_uri", self.parser["OPTIONS"]["db_uri"])
 
         self.cache_type = self.parse_sources("cache_type", self.parser["OPTIONS"]["cache_type"])
