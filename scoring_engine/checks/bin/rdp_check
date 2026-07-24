@@ -1,8 +1,13 @@
 #!/bin/bash
-username=$1
-password=$2
-host=$3
-port=$4
-xfreerdp /auth-only /cert-ignore /u:$username /p:$password /v:$host:$port
+# Arguments are passed as argv by the engine (already shlex.quote()d when the
+# command string is built).  Quote every expansion here as well: without the
+# quotes a credential containing a space is word-split into separate arguments
+# and a credential containing a glob character is filename-expanded, either of
+# which makes an up service look down.
+username="$1"
+password="$2"
+host="$3"
+port="$4"
+xfreerdp /auth-only /cert-ignore "/u:$username" "/p:$password" "/v:$host:$port"
 RETVAL=$?
 [ $RETVAL -eq 0 ] && echo SUCCESS
