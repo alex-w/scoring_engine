@@ -6,18 +6,8 @@ from sqlalchemy.orm import relationship
 from sqlalchemy.sql.sqltypes import Boolean
 
 from scoring_engine.config import config
+from scoring_engine.datetime_utils import ensure_utc_aware
 from scoring_engine.models.base import Base
-
-
-def _ensure_utc_aware(dt):
-    """Ensure datetime is timezone-aware in UTC. Handles both naive and aware datetimes."""
-    if dt is None:
-        return None
-    if dt.tzinfo is None:
-        return pytz.utc.localize(dt)
-    return dt.astimezone(pytz.utc)
-
-
 
 INJECT_CATEGORIES = ["Business", "Technical", "Incident Response"]
 
@@ -64,7 +54,7 @@ class Template(Base):
     @property
     def localized_start_time(self):
         return (
-            _ensure_utc_aware(self.start_time)
+            ensure_utc_aware(self.start_time)
             .astimezone(pytz.timezone(config.timezone))
             .strftime("%Y-%m-%d %H:%M:%S %Z")
         )
@@ -72,7 +62,7 @@ class Template(Base):
     @property
     def localized_end_time(self):
         return (
-            _ensure_utc_aware(self.end_time).astimezone(pytz.timezone(config.timezone)).strftime("%Y-%m-%d %H:%M:%S %Z")
+            ensure_utc_aware(self.end_time).astimezone(pytz.timezone(config.timezone)).strftime("%Y-%m-%d %H:%M:%S %Z")
         )
 
 
