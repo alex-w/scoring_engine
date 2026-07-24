@@ -27,6 +27,7 @@ from scoring_engine.models.check import Check
 from scoring_engine.models.environment import Environment
 from scoring_engine.models.kb import KB
 from scoring_engine.models.round import Round
+from scoring_engine.models.round_score import RoundScore
 from scoring_engine.models.property import Property
 from scoring_engine.models.service import Service
 from scoring_engine.models.setting import Setting
@@ -344,6 +345,12 @@ class Engine(object):
                     ]
                     if round_ids:
                         self.db.session.query(Check).filter(Check.round_id.in_(round_ids)).delete(
+                            synchronize_session=False
+                        )
+                        # Materialized scores are keyed by round; they must die with
+                        # the round or the scoreboard keeps ghost points for a round
+                        # that no longer exists.
+                        self.db.session.query(RoundScore).filter(RoundScore.round_id.in_(round_ids)).delete(
                             synchronize_session=False
                         )
                         self.db.session.query(Round).filter(Round.id.in_(round_ids)).delete(synchronize_session=False)
@@ -677,6 +684,14 @@ class Engine(object):
                 round_obj.round_end = round_end_time
                 self.db.session.commit()
                 logger.info("Database commit complete")
+
+                # Materialize per-team score facts for this round while its checks
+                # are fresh, in the same transaction boundary as the round itself.
+                # Reads consume these instead of re-scanning the full check history.
+                from scoring_engine.scores import materialize_round
+
+                rows_written = materialize_round(self.db.session, round_obj)
+                logger.info("Materialized round scores for %d team(s)", rows_written)
 
             except Exception as e:
                 # Something blew up part way through the round (most often a

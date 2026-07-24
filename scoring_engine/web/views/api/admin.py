@@ -39,6 +39,7 @@ from scoring_engine.models.inject import Inject, InjectComment, InjectRubricScor
 from scoring_engine.models.kb import KB
 from scoring_engine.models.property import Property
 from scoring_engine.models.round import Round
+from scoring_engine.models.round_score import RoundScore
 from scoring_engine.models.service import Service
 from scoring_engine.models.setting import Setting
 from scoring_engine.models.team import Team
@@ -1593,12 +1594,20 @@ def admin_rollback():
         # Count KB entries to delete
         kb_count = db.session.query(KB).filter(KB.round_num >= round_number).count()
 
+        # Count materialized round scores to delete
+        round_scores_count = db.session.query(RoundScore).filter(RoundScore.round_number >= round_number).count()
+
         # Delete checks in batches to avoid lock wait timeout
         BATCH_SIZE = 500
         for i in range(0, len(round_ids), BATCH_SIZE):
             batch_ids = round_ids[i : i + BATCH_SIZE]
             db.session.query(Check).filter(Check.round_id.in_(batch_ids)).delete(synchronize_session=False)
             db.session.commit()
+
+        # Delete materialized round scores. Keyed by round_number, so they must go
+        # with the rounds or the scoreboard keeps ghost points for deleted rounds.
+        db.session.query(RoundScore).filter(RoundScore.round_number >= round_number).delete(synchronize_session=False)
+        db.session.commit()
 
         # Delete KB entries
         db.session.query(KB).filter(KB.round_num >= round_number).delete(synchronize_session=False)
@@ -1632,6 +1641,7 @@ def admin_rollback():
                 "rounds": rounds_count,
                 "checks": checks_count,
                 "kb_entries": kb_count,
+                "round_scores": round_scores_count,
             },
             "new_current_round": Round.get_last_round_num(),
         }
@@ -1668,7 +1678,7 @@ def admin_rollback_preview():
                 "status": "success",
                 "current_round": 0,
                 "round_number": round_number,
-                "will_delete": {"rounds": 0, "checks": 0, "kb_entries": 0},
+                "will_delete": {"rounds": 0, "checks": 0, "kb_entries": 0, "round_scores": 0},
             }
         )
 
@@ -1682,6 +1692,9 @@ def admin_rollback_preview():
     # Count KB entries
     kb_count = db.session.query(KB).filter(KB.round_num >= round_number).count()
 
+    # Count materialized round scores
+    round_scores_count = db.session.query(RoundScore).filter(RoundScore.round_number >= round_number).count()
+
     return jsonify(
         {
             "status": "success",
@@ -1691,6 +1704,7 @@ def admin_rollback_preview():
                 "rounds": len(rounds_to_delete),
                 "checks": checks_count,
                 "kb_entries": kb_count,
+                "round_scores": round_scores_count,
             },
         }
     )

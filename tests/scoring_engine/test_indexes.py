@@ -72,8 +72,16 @@ class TestModelIndexDeclarations:
         assert actual_columns == expected_columns
 
     def test_no_undeclared_extra_indexes(self):
-        """Guard against a stray index landing in the models without a migration."""
-        declared = set(self._metadata_indexes())
+        """Guard against a stray index on a 003-managed table without a migration.
+
+        Scoped to the tables migration 003 owns. A later migration that adds a new
+        table with its own indexes (e.g. 005's round_score) is legitimate and must
+        not trip this guard -- it is validated by that migration's own test.
+        """
+        managed_tables = {table for table, _cols in EXPECTED_INDEXES.values()}
+        declared = {
+            name for name, (table, _cols) in self._metadata_indexes().items() if table in managed_tables
+        }
         assert declared == set(EXPECTED_INDEXES)
 
     def test_flag_solves_unique_constraint_still_present(self):
