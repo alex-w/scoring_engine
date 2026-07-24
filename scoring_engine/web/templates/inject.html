@@ -419,7 +419,7 @@
           var isOwn = value.team == TEAM_NAME;
           comments += '<div class="chart-card mb-2" style="padding:0; overflow:hidden;">' +
             '<div style="padding:0.5rem 1rem; font-size:0.85rem; color:var(--bs-secondary-color);' + (isOwn ? ' border-left:3px solid #58a6ff;' : '') + '">' +
-            '<strong>' + value.user + '</strong> <span class="text-muted">(' + value.team + ')</span> &middot; ' + value.added + '</div>' +
+            '<strong>' + ScoringEngineUtils.escapeHtml(value.user) + '</strong> <span class="text-muted">(' + ScoringEngineUtils.escapeHtml(value.team) + ')</span> &middot; ' + ScoringEngineUtils.escapeHtml(value.added) + '</div>' +
             '<div style="padding:0.75rem 1rem;">' + value.text + '</div></div>';
         });
         $("#comments").html(comments);

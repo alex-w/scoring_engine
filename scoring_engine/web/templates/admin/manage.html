@@ -90,6 +90,9 @@
     </table>
   </div>
   <script>
+    /* Usernames are stored verbatim, so escape them before building markup. */
+    var escapeHtml = ScoringEngineUtils.escapeHtml;
+
     /* Formatting function for row details - modify as you need */
     function format (data) {
       var rows = [
@@ -102,7 +105,8 @@
       ];
 
       for (var key in data.users) {
-        rows.push('<tr><td>' + key + '</td><td>' + data.users[key][0] + '</td><td>' + data.users[key][1] + '</td></tr>');
+        rows.push('<tr><td>' + escapeHtml(key) + '</td><td>' + escapeHtml(data.users[key][0]) +
+                  '</td><td>' + escapeHtml(data.users[key][1]) + '</td></tr>');
       }
 
       rows.push('</tbody></table>');

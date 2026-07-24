@@ -48,10 +48,27 @@ var ScoringEngineUtils = (function() {
         if (el.textContent !== text) el.textContent = text;
     }
 
+    /**
+     * Escape a value for safe interpolation into an HTML string.
+     * User-controlled data (usernames, team names, ...) is stored verbatim, so
+     * anything built as markup in JS must be escaped here at render time.
+     * @param {*} value - The value to escape
+     * @returns {string} - HTML-escaped string
+     */
+    function escapeHtml(value) {
+        return String(value === null || value === undefined ? '' : value)
+            .replace(/&/g, '&amp;')
+            .replace(/</g, '&lt;')
+            .replace(/>/g, '&gt;')
+            .replace(/"/g, '&quot;')
+            .replace(/'/g, '&#39;');
+    }
+
     // Public API
     return {
         sanitizeSelector: sanitizeSelector,
         animateCounter: animateCounter,
-        setText: setText
+        setText: setText,
+        escapeHtml: escapeHtml
     };
 })();
