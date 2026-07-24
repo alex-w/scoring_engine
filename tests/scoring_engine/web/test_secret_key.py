@@ -12,10 +12,18 @@ importing module holds its own instance. These tests therefore patch
 """
 
 import logging
+import os
+import re
 
 import pytest
 
 import scoring_engine.web as web
+
+REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+SETUP_SCRIPT = os.path.join(REPO_ROOT, "bin", "setup")
+
+# Anything that looks like a generated key: a long unbroken run of hex.
+LOOKS_LIKE_A_KEY = re.compile(r"[0-9a-f]{32,}")
 
 
 @pytest.fixture
@@ -107,3 +115,76 @@ class TestCreateAppSecretKey:
             app = web.create_app()
         assert app.secret_key
         assert "No secret_key is configured" in caplog.text
+
+
+class TestSecretKeyIsConfigured:
+    """bin/setup and the web app must agree on what 'configured' means."""
+
+    @pytest.mark.parametrize("value", ["a-very-stable-secret", "  padded-secret\n"])
+    def test_true_for_usable_values(self, set_secret_key, value):
+        set_secret_key(value)
+        assert web.secret_key_is_configured() is True
+
+    @pytest.mark.parametrize("value", ["", "   ", None])
+    def test_false_for_unusable_values(self, set_secret_key, value):
+        set_secret_key(value)
+        assert web.secret_key_is_configured() is False
+
+    def test_false_when_option_is_absent(self, monkeypatch):
+        monkeypatch.delattr(web.config, "secret_key", raising=False)
+        assert web.secret_key_is_configured() is False
+
+
+class TestWarningsNeverCarryASecret:
+    """Log output is widely readable, so it must never contain a live key.
+
+    Container logs are visible to anyone who can run ``docker logs`` and are
+    routinely forwarded to an aggregator. A key printed there is compromised on
+    arrival, so we emit the command to generate one instead.
+    """
+
+    @pytest.mark.parametrize(
+        "message",
+        [web.MISSING_SECRET_KEY_WARNING, web.MISSING_SECRET_KEY_SETUP_WARNING],
+    )
+    def test_message_tells_the_operator_how_to_generate_a_key(self, message):
+        assert "secrets.token_hex(64)" in message
+
+    @pytest.mark.parametrize(
+        "message",
+        [web.MISSING_SECRET_KEY_WARNING, web.MISSING_SECRET_KEY_SETUP_WARNING],
+    )
+    def test_message_is_constant_and_contains_no_key(self, message):
+        assert LOOKS_LIKE_A_KEY.search(message) is None
+
+    def test_runtime_warning_does_not_leak_the_generated_key(self, set_secret_key, caplog):
+        """The throwaway key the web app falls back to must not be logged."""
+        set_secret_key("")
+        with caplog.at_level(logging.WARNING, logger="scoring_engine"):
+            key = web.get_secret_key()
+        assert key not in caplog.text
+        assert LOOKS_LIKE_A_KEY.search(caplog.text) is None
+
+    def test_configured_key_is_never_logged(self, set_secret_key, caplog):
+        set_secret_key("0123456789abcdef0123456789abcdef0123456789abcdef")
+        with caplog.at_level(logging.DEBUG, logger="scoring_engine"):
+            web.create_app()
+        assert "0123456789abcdef" not in caplog.text
+
+
+class TestSetupScriptDoesNotPrintASecret:
+    """bin/setup warns about a missing key; it must not generate and print one."""
+
+    def _source(self):
+        with open(SETUP_SCRIPT) as fh:
+            return fh.read()
+
+    def test_does_not_generate_a_key(self):
+        source = self._source()
+        for generator in ("token_hex", "token_urlsafe", "token_bytes", "urandom"):
+            assert generator not in source, f"bin/setup must not generate a secret ({generator})"
+
+    def test_uses_the_shared_warning(self):
+        source = self._source()
+        assert "MISSING_SECRET_KEY_SETUP_WARNING" in source
+        assert "secret_key_is_configured" in source

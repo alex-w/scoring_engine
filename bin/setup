@@ -1,7 +1,6 @@
 #!/usr/bin/env python
 import optparse
 import os
-import secrets
 from datetime import datetime, timedelta
 from random import choice, randint, sample
 
@@ -20,7 +19,12 @@ from scoring_engine.models.setting import Setting
 from scoring_engine.models.team import Team
 from scoring_engine.models.announcement import Announcement
 from scoring_engine.version import version
-from scoring_engine.web import create_app
+from scoring_engine.web import (
+    MISSING_SECRET_KEY_SETUP_WARNING,
+    SECRET_KEY_LOCATION_HINT,
+    create_app,
+    secret_key_is_configured,
+)
 
 parser = optparse.OptionParser()
 parser.add_option("--overwrite-db", action="store_true", default=False)
@@ -52,18 +56,16 @@ logger.info("Starting Setup v.{0}".format(version))
 # build time, or hand-edited on manual installs), and under docker compose this
 # script runs in a short-lived bootstrap container whose filesystem is not
 # shared with the web containers -- a key persisted here would never reach the
-# process that actually signs session cookies. So instead we hand the operator a
-# ready-to-use value and tell them exactly where to put it.
-if not (config.secret_key or "").strip():
-    logger.warning(
-        "No secret_key is configured. Until one is set, every web restart logs all users "
-        "out and sessions cannot be shared between web processes/containers."
-    )
-    logger.warning(
-        "Set it in your .env file (docker) or engine.conf (manual install) before starting "
-        "the web app. A strong value you can use:"
-    )
-    logger.warning("    SCORINGENGINE_SECRET_KEY=%s", secrets.token_hex(64))
+# process that actually signs session cookies.
+#
+# We also do NOT generate a key and print it. This output goes to the container
+# log stream, which is readable by anyone who can run `docker logs` and is often
+# forwarded to a log aggregator; a session signing key emitted there is
+# compromised on arrival. Instead we tell the operator how to generate one
+# locally and where to put it.
+if not secret_key_is_configured():
+    logger.warning(MISSING_SECRET_KEY_SETUP_WARNING)
+    logger.warning(SECRET_KEY_LOCATION_HINT)
 
 # Create Flask app for app context
 app = create_app()

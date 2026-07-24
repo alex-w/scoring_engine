@@ -24,6 +24,8 @@ Configuration Keys
 ------------------
 .. note:: Each of these config keys can be expressed via environment variables (and take precendence over the values defined in the file). IE: To define target_round_time, I'd set SCORINGENGINE_TARGET_ROUND_TIME=3.
 
+.. note:: An environment variable that exists but is **empty** (or whitespace only) is treated as *unset* and does **not** override the config file. A leftover ``SCORINGENGINE_FOO=`` line in a copied ``.env`` therefore cannot silently blank out a value you configured in ``engine.conf``. If you genuinely want an option to be empty, leave it empty in the config file instead (this is how ``redis_password`` ships).
+
 .. list-table::
    :widths: 25 50
    :header-rows: 1
@@ -122,9 +124,16 @@ would be a vulnerability.
 
 **Generating a key**
 
+Generate it yourself, on a machine you trust:
+
 ::
 
   python -c "import secrets; print(secrets.token_hex(64))"
+
+The engine never generates a key *for* you and prints it. Anything written to
+stdout ends up in the container log stream, which is readable by anyone who can
+run ``docker logs`` and is frequently shipped to a log aggregator -- a signing
+key that appears there should be considered compromised.
 
 **Setting it**
 
@@ -137,7 +146,11 @@ build time, so use the environment instead):
   SCORINGENGINE_SECRET_KEY=<paste the generated value>
 
 The ``web``, ``engine``, and ``bootstrap`` services in ``docker-compose.yml``
-already pass this variable through.
+already pass this variable through. ``.env.example`` ships this line commented
+out on purpose: an empty ``SCORINGENGINE_SECRET_KEY=`` is still an assignment,
+and compose would forward it into the containers as an empty string. (Since an
+empty environment variable is treated as unset, it no longer overrides the
+config file -- but a commented-out line makes the intent unambiguous.)
 
 Manual install, in ``engine.conf``:
 
@@ -149,8 +162,8 @@ Manual install, in ``engine.conf``:
 
 The application still starts. It generates a random key for that process and
 logs a warning explaining that sessions will not survive a restart and cannot
-scale beyond one process. ``bin/setup`` performs the same check and prints a
-ready-to-use generated value. This is fine for local development and never fine
-for a competition.
+scale beyond one process. ``bin/setup`` performs the same check and warns with
+the command to generate a key -- it does not print a key. This is fine for local
+development and never fine for a competition.
 
 .. warning:: Treat the key like a password. Do not commit it, and rotate it if it leaks -- rotating logs everyone out, which is the intended effect.
