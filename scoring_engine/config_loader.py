@@ -274,6 +274,18 @@ class ConfigLoader(object):
             "bool",
         )
 
+        # Red-team flag scoring: flat points per captured flag by permission level.
+        self.flag_points_user = self.parse_sources(
+            "flag_points_user",
+            int(self.parser["OPTIONS"].get("flag_points_user", "100")),
+            "int",
+        )
+        self.flag_points_root = self.parse_sources(
+            "flag_points_root",
+            int(self.parser["OPTIONS"].get("flag_points_root", "200")),
+            "int",
+        )
+
     def parse_sources(self, key_name, default_value, obj_type="str"):
         """Return a configuration value using environment overrides when present.
 

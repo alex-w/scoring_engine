@@ -113,3 +113,10 @@ dynamic_scoring_late_multiplier = 0.5
 # Inject Score Visibility
 # Show inject scores on the public scoreboard (default: hidden for private grading)
 inject_scores_visible = False
+
+# Red-Team Flag Scoring
+# Flat points awarded to the red team per captured flag, by permission level.
+# A captured flag (a Solve reported by a blue team's agent) adds to the red
+# team's total; the compromised blue team's own score is not reduced.
+flag_points_user = 100
+flag_points_root = 200

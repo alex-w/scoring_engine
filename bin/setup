@@ -213,6 +213,10 @@ with app.app_context():
     logger.info("Creating the Inject Settings")
     db.session.add(Setting(name="inject_scores_visible", value=config.inject_scores_visible))
 
+    # Red-team flag scoring (flat points per captured flag by permission level)
+    db.session.add(Setting(name="flag_points_user", value=str(config.flag_points_user)))
+    db.session.add(Setting(name="flag_points_root", value=str(config.flag_points_root)))
+
     db.session.commit()
 
     if options.example:

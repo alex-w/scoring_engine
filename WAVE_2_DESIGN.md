@@ -236,6 +236,30 @@ Open question for the maintainer (see §11): does a captured flag *subtract* fro
 blue team's score, or only *add* to red's? Both are legitimate competition rules; the
 schema supports either (it stores the raw flag_points; the read path decides sign).
 
+### Implementation note (phase 4, as built)
+
+Implementing this revealed that the "materialize `flag_points` into `round_score` at
+round close" plan does not fit the data: a `Solve` row has **no round and no
+timestamp** (just `flag_id`, `host`, `team_id`), and it is created asynchronously on
+agent check-in, while the engine creates the `Round` row only at round *close*. There
+is no reliable way to attribute a solve to a round after the fact. The `checks`-volume
+performance argument also does not apply — the `flag_solves` table is small.
+
+So flags are scored **live from the `solves` table**, the way injects are scored
+(an event-driven component), not materialized per round:
+
+- `scoring_engine.scores.flag_points_by_team()` → `{blue_team_id: captured value}`,
+  each non-dummy solve worth `flag_points_user`/`flag_points_root` by its flag's perm.
+- `red_team_flag_total()` → sum across all blue teams (add-to-red-only, resolved §11).
+- Surfaced by `/api/flags/score` (red/white only) and a card on the flags page.
+
+`round_score.flag_points` therefore stays `0` (reserved). It is left in place rather
+than dropped with another migration; if per-solve round attribution is ever wanted, a
+`Solve.round_number` (or `created_at`) column would enable materialization here.
+Wall-clock **freeze** (phase 6) will filter solves by a `Solve.created_at` added then;
+until that column exists, flag freeze is best-effort. Rollback does not currently
+delete solves (they are red captures, independent of blue's service rounds).
+
 ---
 
 ## 7. Rollback, freeze, and cache — the three cross-cutting contracts

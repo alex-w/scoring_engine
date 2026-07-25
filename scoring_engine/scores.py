@@ -164,6 +164,64 @@ def team_service_score(session, team_id):
     return int(total or 0)
 
 
+def get_flag_point_values():
+    """Return ``(user_points, root_points)`` for captured flags from settings.
+
+    Admin-tunable mid-competition (like the SLA settings); falls back to the
+    documented defaults if a setting is missing or unparseable.
+    """
+    from scoring_engine.models.setting import Setting
+
+    def _int(name, default):
+        setting = Setting.get_setting(name)
+        try:
+            return int(setting.value) if setting else default
+        except (ValueError, TypeError):
+            return default
+
+    return _int("flag_points_user", 100), _int("flag_points_root", 200)
+
+
+def flag_points_by_team(session, user_points=None, root_points=None):
+    """Return ``{blue_team_id: captured_flag_value}`` -- each team's flag exposure.
+
+    A captured flag is a non-dummy ``Solve`` (a blue team's agent reported a red
+    flag present on one of its hosts). Each is worth ``root_points`` when the flag
+    is a root flag, else ``user_points``. This is the value the red team earns for
+    compromising that team; per the "add to red only" rule the blue team's own
+    score is unaffected.
+    """
+    from scoring_engine.models.flag import Flag, Solve
+
+    if user_points is None or root_points is None:
+        cfg_user, cfg_root = get_flag_point_values()
+        user_points = cfg_user if user_points is None else user_points
+        root_points = cfg_root if root_points is None else root_points
+
+    rows = (
+        session.query(Solve.team_id, Flag.perm, func.count())
+        .join(Flag, Flag.id == Solve.flag_id)
+        .filter(Flag.dummy.is_(False))
+        .group_by(Solve.team_id, Flag.perm)
+        .all()
+    )
+    result = {}
+    for team_id, perm, count in rows:
+        perm_value = perm.value if hasattr(perm, "value") else perm
+        points = root_points if perm_value == "root" else user_points
+        result[team_id] = result.get(team_id, 0) + points * count
+    return result
+
+
+def red_team_flag_total(session, user_points=None, root_points=None):
+    """Total red-team flag score: the sum of every blue team's captured-flag value.
+
+    The red team scores by compromising anyone, so its total is the sum across all
+    blue teams (a handful of red teams share this pool today).
+    """
+    return sum(flag_points_by_team(session, user_points, root_points).values())
+
+
 def team_dynamic_service_score(session, team_id, sla_config):
     """One team's service score with the dynamic multiplier applied per round.
 
