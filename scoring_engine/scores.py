@@ -5,10 +5,13 @@ Wave 2 replaces recompute-from-full-history scoring with a per-round fact table
 
 - Write: :func:`materialize_round` (called by the engine at round close) and
   :func:`materialize_all_rounds` (backfill / non-engine contexts).
-- Read: :func:`team_service_scores` (all teams, for the scoreboard/overview),
-  :func:`team_service_score` (one team's raw total, backing ``Team.current_score``),
-  and :func:`team_dynamic_service_score` (one team, dynamic multiplier applied,
-  backing the SLA base). These replace the full-history ``JOIN checks`` scans.
+- Read: :func:`team_service_scores` (all teams, dynamic-aware, for the
+  scoreboard/overview), :func:`all_team_service_scores` (all teams, raw, backing
+  ``Team.place``), :func:`team_service_score` (one team's raw total, backing
+  ``Team.current_score``), and :func:`team_dynamic_service_score` (one team,
+  dynamic multiplier applied, backing the SLA base). ``Team.get_array_of_scores`` /
+  ``get_round_scores`` and the scoreboard line chart also read round_score directly.
+  These replace the full-history ``JOIN checks`` scans.
 
 Per-service reads (``Service.score_earned``/``rank``) and SLA consecutive-failure
 detection still read ``checks`` directly -- round_score is team-grained.
@@ -124,8 +127,7 @@ def team_service_scores(session, sla_config=None):
         sla_config = get_sla_config()
 
     if not sla_config.dynamic_enabled:
-        rows = session.query(RoundScore.team_id, func.sum(RoundScore.service_points)).group_by(RoundScore.team_id).all()
-        return {team_id: int(total or 0) for team_id, total in rows}
+        return all_team_service_scores(session)
 
     # Dynamic: each round_score row already holds a team's per-round total, so apply
     # the multiplier per row keyed on the stored round_number.
@@ -136,6 +138,16 @@ def team_service_scores(session, sla_config=None):
             round_number, service_points, sla_config
         )
     return scores
+
+
+def all_team_service_scores(session):
+    """Raw ``{team_id: service_score}`` for every team, no dynamic multiplier.
+
+    Backs ``Team.place`` (raw ranking) and the non-dynamic branch of
+    :func:`team_service_scores`.
+    """
+    rows = session.query(RoundScore.team_id, func.sum(RoundScore.service_points)).group_by(RoundScore.team_id).all()
+    return {team_id: int(total or 0) for team_id, total in rows}
 
 
 def team_service_score(session, team_id):

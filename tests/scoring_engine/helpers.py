@@ -24,6 +24,11 @@ def populate_sample_data(session):
     check_2 = Check(service=service, result=False, output="Bad output", round=round_2)
     session.add(check_2)
     session.commit()
+    # Materialize round_score, as the engine does at round close, so score reads
+    # (now backed by round_score) reflect these checks.
+    from scoring_engine.scores import materialize_all_rounds
+
+    materialize_all_rounds(session)
     return team
 
 
