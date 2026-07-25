@@ -71,6 +71,9 @@ class TestOverviewAPI:
             check = Check(service=svc, round=round_obj, result=result, output="", completed=True)
             db.session.add(check)
         db.session.commit()
+        from scoring_engine.scores import materialize_round
+
+        materialize_round(db.session, round_obj.id, round_number)
         return round_obj
 
     # --- get_anonymize_mode (via /api/overview/get_columns endpoint) ---

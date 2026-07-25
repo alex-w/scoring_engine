@@ -63,6 +63,7 @@ class TestTeam:
 
     def test_current_score(self):
         from scoring_engine.models.round import Round
+        from scoring_engine.scores import materialize_all_rounds
 
         team = generate_sample_model_tree("Team", db.session)
         # Checks always belong to a round in production (the engine creates them
@@ -83,6 +84,7 @@ class TestTeam:
         db.session.add(service_3)
         db.session.add(Check(service=service_3, result=False, output="bad output", round=round_1))
         db.session.commit()
+        materialize_all_rounds(db.session)
         assert team.current_score == 300
 
     def test_place(self):
