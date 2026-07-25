@@ -1,9 +1,17 @@
-"""Score materialization.
+"""Score materialization and reads.
 
 Wave 2 replaces recompute-from-full-history scoring with a per-round fact table
-(``round_score``). This module owns writing those rows. Read helpers that consume
-them land in phase 2; for now the only public entry point is
-:func:`materialize_round`, called by the engine when a round closes.
+(``round_score``). This module owns both sides of it:
+
+- Write: :func:`materialize_round` (called by the engine at round close) and
+  :func:`materialize_all_rounds` (backfill / non-engine contexts).
+- Read: :func:`team_service_scores` (all teams, for the scoreboard/overview),
+  :func:`team_service_score` (one team's raw total, backing ``Team.current_score``),
+  and :func:`team_dynamic_service_score` (one team, dynamic multiplier applied,
+  backing the SLA base). These replace the full-history ``JOIN checks`` scans.
+
+Per-service reads (``Service.score_earned``/``rank``) and SLA consecutive-failure
+detection still read ``checks`` directly -- round_score is team-grained.
 """
 
 from sqlalchemy.sql import func
@@ -82,3 +90,79 @@ def materialize_round(session, round_id, round_number, points_by_team=None, clea
     if commit:
         session.commit()
     return written
+
+
+def materialize_all_rounds(session, commit=True):
+    """(Re)materialize round_score for every round from the current checks.
+
+    Idempotent per round (clear-and-rewrite). The engine keeps round_score current
+    at round close in production; this is for backfill parity and for any context
+    that creates checks without the engine (tests, manual imports, a one-off
+    recompute after correcting historical data).
+    """
+    from scoring_engine.models.round import Round
+
+    total = 0
+    for round_id, round_number in session.query(Round.id, Round.number).all():
+        total += materialize_round(session, round_id, round_number, clear_existing=True, commit=False)
+    if commit:
+        session.commit()
+    return total
+
+
+def team_service_scores(session, sla_config=None):
+    """Return ``{team_id: service_score}`` for all teams, read from round_score.
+
+    Replaces the full-history ``SUM(Service.points) JOIN checks GROUP BY team``
+    scans on the scoreboard and overview. Dynamic scoring, when enabled, is applied
+    per round from the stored raw points and ``round_number`` -- exactly as the old
+    per-round path did -- so behaviour is unchanged.
+    """
+    from scoring_engine.sla import apply_dynamic_scoring_to_round, get_sla_config
+
+    if sla_config is None:
+        sla_config = get_sla_config()
+
+    if not sla_config.dynamic_enabled:
+        rows = session.query(RoundScore.team_id, func.sum(RoundScore.service_points)).group_by(RoundScore.team_id).all()
+        return {team_id: int(total or 0) for team_id, total in rows}
+
+    # Dynamic: each round_score row already holds a team's per-round total, so apply
+    # the multiplier per row keyed on the stored round_number.
+    scores = {}
+    rows = session.query(RoundScore.team_id, RoundScore.round_number, RoundScore.service_points).all()
+    for team_id, round_number, service_points in rows:
+        scores[team_id] = scores.get(team_id, 0) + apply_dynamic_scoring_to_round(
+            round_number, service_points, sla_config
+        )
+    return scores
+
+
+def team_service_score(session, team_id):
+    """Raw (un-weighted, un-multiplied) service score for one team from round_score.
+
+    Matches the historical semantics of ``Team.current_score`` -- callers that want
+    dynamic scoring go through :func:`team_service_scores`.
+    """
+    total = (
+        session.query(func.coalesce(func.sum(RoundScore.service_points), 0))
+        .filter(RoundScore.team_id == team_id)
+        .scalar()
+    )
+    return int(total or 0)
+
+
+def team_dynamic_service_score(session, team_id, sla_config):
+    """One team's service score with the dynamic multiplier applied per round.
+
+    Reads the team's per-round raw points from round_score and applies the
+    multiplier keyed on the stored round_number -- the same result as the old
+    full-history GROUP BY over checks.
+    """
+    from scoring_engine.sla import apply_dynamic_scoring_to_round
+
+    total = 0
+    rows = session.query(RoundScore.round_number, RoundScore.service_points).filter(RoundScore.team_id == team_id).all()
+    for round_number, service_points in rows:
+        total += apply_dynamic_scoring_to_round(round_number, service_points, sla_config)
+    return total

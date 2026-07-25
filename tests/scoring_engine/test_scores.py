@@ -9,6 +9,7 @@ builds on.
 
 from scoring_engine.db import db
 from scoring_engine.models.round_score import RoundScore
+from scoring_engine.models.service import Service
 from scoring_engine.scores import compute_round_service_points, materialize_round
 from tests.scoring_engine.factories import make_check, make_round, make_service, make_team
 
@@ -124,14 +125,27 @@ class TestMaterializeRound:
         assert len(rows) == 1
         assert rows[0].service_points == 100
 
-    def test_golden_equivalence_with_current_score(self):
-        """SUM(round_score.service_points) per team == Team.current_score.
-
-        This is the invariant every later phase depends on. Build several teams,
-        services with different point values, and multiple rounds with a mix of
-        passing and failing checks, then prove the materialized totals match the
-        live computation exactly.
+    def test_golden_equivalence_with_full_history_oracle(self):
+        """SUM(round_score.service_points) per team == the checks-based full-history
+        sum. Team.current_score now READS round_score, so it can't be the oracle
+        (that would be circular); the oracle is an explicit checks query, exactly
+        the computation round_score replaces. This is the invariant every later
+        phase depends on: build several teams, services with distinct point values,
+        and rounds with mixed pass/fail, then prove the two agree.
         """
+        from scoring_engine.models.check import Check as _Check
+
+        def oracle(team_id):
+            return int(
+                db.session.query(db.func.coalesce(db.func.sum(Service.points), 0))
+                .select_from(Service)
+                .join(_Check)
+                .filter(Service.team_id == team_id)
+                .filter(_Check.result.is_(True))
+                .scalar()
+                or 0
+            )
+
         teams = [make_team(color="Blue") for _ in range(3)]
         # Give each team two services with distinct point values.
         services = {}
@@ -153,12 +167,15 @@ class TestMaterializeRound:
             materialize_round(db.session, rnd.id, rnd.number)
 
         for t in teams:
-            materialized = (
+            materialized = int(
                 db.session.query(db.func.coalesce(db.func.sum(RoundScore.service_points), 0))
                 .filter(RoundScore.team_id == t.id)
                 .scalar()
             )
-            assert materialized == t.current_score, f"team {t.id}: {materialized} != {t.current_score}"
+            expected = oracle(t.id)
+            assert materialized == expected, f"team {t.id}: round_score {materialized} != oracle {expected}"
+            # And the model property, now backed by round_score, agrees with both.
+            assert t.current_score == expected
 
     def test_rolling_back_a_round_leaves_no_ghost_scores(self):
         """Deleting rounds must delete their round_score rows (the rollback contract)."""

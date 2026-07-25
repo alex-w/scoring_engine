@@ -10,7 +10,6 @@ from scoring_engine.db import db
 from scoring_engine.models.base import Base
 from scoring_engine.models.check import Check
 
-
 # Curated palette: medium-saturation, medium-lightness colors that maintain
 # WCAG AA contrast (4.5:1) on both dark (#0a0a0a–#161616) and light
 # (#fafafa–#ffffff) backgrounds across all visual themes.
@@ -114,22 +113,14 @@ class Team(Base):
     @property
     def current_score(self):
         """
-        Calculate current score from successful checks.
-        WARNING: This performs a DB query on each access. Consider caching results
-        or using bulk queries when accessing scores for multiple teams.
+        Current raw service score, read from the materialized round_score table
+        instead of re-summing the full check history on every access. Identical in
+        value to the old ``SUM(Service.points) JOIN checks WHERE result`` -- the
+        engine writes one round_score row per team per round at round close.
         """
-        score = (
-            db.session.query(func.sum(Service.points))
-            .select_from(Team)
-            .join(Service)
-            .join(Check)
-            .filter(Service.team_id == self.id)
-            .filter(Check.result.is_(True))
-            .scalar()
-        )
-        if not score:
-            return 0
-        return score
+        from scoring_engine.scores import team_service_score
+
+        return team_service_score(db.session, self.id)
 
     @property
     def current_inject_score(self):
@@ -189,24 +180,88 @@ class Team(Base):
     # Adjectives and animals for anonymous team names
     # 50 adjectives × 30 animals = 1500 unique combinations
     _ADJECTIVES = [
-        "Swift", "Brave", "Mighty", "Silent", "Cunning",
-        "Bold", "Fierce", "Noble", "Stealthy", "Shadow",
-        "Iron", "Golden", "Crystal", "Storm", "Frost",
-        "Crimson", "Thunder", "Phantom", "Blazing", "Savage",
-        "Lunar", "Solar", "Cyber", "Primal", "Spectral",
-        "Ancient", "Emerald", "Sapphire", "Onyx", "Obsidian",
-        "Rapid", "Rogue", "Eternal", "Mystic", "Stealth",
-        "Elite", "Prime", "Alpha", "Omega", "Delta",
-        "Apex", "Neon", "Arctic", "Inferno", "Venom",
-        "Titan", "Dusk", "Tempest", "Wraith", "Chaos",
+        "Swift",
+        "Brave",
+        "Mighty",
+        "Silent",
+        "Cunning",
+        "Bold",
+        "Fierce",
+        "Noble",
+        "Stealthy",
+        "Shadow",
+        "Iron",
+        "Golden",
+        "Crystal",
+        "Storm",
+        "Frost",
+        "Crimson",
+        "Thunder",
+        "Phantom",
+        "Blazing",
+        "Savage",
+        "Lunar",
+        "Solar",
+        "Cyber",
+        "Primal",
+        "Spectral",
+        "Ancient",
+        "Emerald",
+        "Sapphire",
+        "Onyx",
+        "Obsidian",
+        "Rapid",
+        "Rogue",
+        "Eternal",
+        "Mystic",
+        "Stealth",
+        "Elite",
+        "Prime",
+        "Alpha",
+        "Omega",
+        "Delta",
+        "Apex",
+        "Neon",
+        "Arctic",
+        "Inferno",
+        "Venom",
+        "Titan",
+        "Dusk",
+        "Tempest",
+        "Wraith",
+        "Chaos",
     ]
     _ANIMALS = [
-        "Falcon", "Wolf", "Tiger", "Panther", "Eagle",
-        "Bear", "Lion", "Viper", "Phoenix", "Dragon",
-        "Hawk", "Cobra", "Raven", "Jaguar", "Shark",
-        "Lynx", "Scorpion", "Stallion", "Raptor", "Hydra",
-        "Griffin", "Serpent", "Kraken", "Mantis", "Barracuda",
-        "Wyvern", "Basilisk", "Chimera", "Sphinx", "Cerberus",
+        "Falcon",
+        "Wolf",
+        "Tiger",
+        "Panther",
+        "Eagle",
+        "Bear",
+        "Lion",
+        "Viper",
+        "Phoenix",
+        "Dragon",
+        "Hawk",
+        "Cobra",
+        "Raven",
+        "Jaguar",
+        "Shark",
+        "Lynx",
+        "Scorpion",
+        "Stallion",
+        "Raptor",
+        "Hydra",
+        "Griffin",
+        "Serpent",
+        "Kraken",
+        "Mantis",
+        "Barracuda",
+        "Wyvern",
+        "Basilisk",
+        "Chimera",
+        "Sphinx",
+        "Cerberus",
     ]
 
     @classmethod

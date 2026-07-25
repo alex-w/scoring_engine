@@ -62,21 +62,26 @@ class TestTeam:
         assert team.users == [user_1, user_2]
 
     def test_current_score(self):
+        from scoring_engine.models.round import Round
+
         team = generate_sample_model_tree("Team", db.session)
+        # Checks always belong to a round in production (the engine creates them
+        # inside one); build them that way so current_score, now read from the
+        # round_score materialization, reflects them. (The conftest autouse
+        # fixture keeps round_score in sync for the read.)
+        round_1 = Round(number=1)
+        round_2 = Round(number=2)
+        db.session.add_all([round_1, round_2])
         service_1 = Service(name="Example Service 1", team=team, check_name="ICMP IPv4 Check", host="127.0.0.1")
         db.session.add(service_1)
-        check_1 = Check(service=service_1, result=True, output="Good output")
-        db.session.add(check_1)
+        db.session.add(Check(service=service_1, result=True, output="Good output", round=round_1))
         service_2 = Service(name="Example Service 2", team=team, check_name="SSH IPv4 Check", host="127.0.0.2")
         db.session.add(service_2)
-        check_2 = Check(service=service_2, result=True, output="Good output")
-        db.session.add(check_2)
-        check_3 = Check(service=service_2, result=True, output="Good output")
-        db.session.add(check_3)
+        db.session.add(Check(service=service_2, result=True, output="Good output", round=round_1))
+        db.session.add(Check(service=service_2, result=True, output="Good output", round=round_2))
         service_3 = Service(name="Example Service 3", team=team, check_name="SSH IPv4 Check", host="127.0.0.3")
         db.session.add(service_3)
-        check_3 = Check(service=service_3, result=False, output="bad output")
-        db.session.add(check_3)
+        db.session.add(Check(service=service_3, result=False, output="bad output", round=round_1))
         db.session.commit()
         assert team.current_score == 300
 

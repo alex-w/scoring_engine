@@ -96,6 +96,48 @@ def db_session(app, _db_tables):
         db.session.commit()
 
 
+@pytest.fixture(autouse=True)
+def _materialize_scores_on_read(db_session):
+    """Keep round_score in sync for the score-read helpers, in tests.
+
+    In production the engine materializes round_score at round close (see
+    scoring_engine.scores.materialize_round), so by the time anything reads a score
+    the rows exist. Unit tests, however, create Check rows directly without running
+    the engine. Rather than sprinkle materialize calls through every test that
+    builds checks, we wrap the three round_score read helpers so they refresh
+    round_score from the current checks first. materialize_all_rounds is idempotent
+    and cheap on test-sized data.
+
+    This affects only the read path's data freshness -- the write path itself
+    (materialize_round at round close, failed-round cleanup, rollback) is exercised
+    directly by tests/scoring_engine/test_scores.py and the engine tests.
+
+    Patches manually (save/restore) rather than via pytest's ``monkeypatch``: some
+    engine tests install a flaky ``db.session.commit`` through their own
+    ``monkeypatch``, and depending on it here would reorder that fixture's teardown
+    to after the db_session cleanup commit, tripping the flaky commit at teardown.
+    """
+    import scoring_engine.scores as scores
+
+    names = ("team_service_score", "team_service_scores", "team_dynamic_service_score")
+    originals = {name: getattr(scores, name) for name in names}
+
+    def make_wrapper(orig):
+        def wrapper(session, *args, **kwargs):
+            scores.materialize_all_rounds(session)
+            return orig(session, *args, **kwargs)
+
+        return wrapper
+
+    for name, original in originals.items():
+        setattr(scores, name, make_wrapper(original))
+    try:
+        yield
+    finally:
+        for name, original in originals.items():
+            setattr(scores, name, original)
+
+
 # ---------------------------------------------------------------------------
 # Phase 3: Shared auth fixtures
 # ---------------------------------------------------------------------------

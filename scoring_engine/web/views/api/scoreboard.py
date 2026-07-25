@@ -45,41 +45,13 @@ def calculate_team_scores_with_dynamic_scoring(sla_config):
     Calculate team scores with dynamic scoring multipliers applied per-round.
 
     Returns dict mapping team_id to total score with multipliers applied.
+
+    Reads from the materialized round_score table (see scoring_engine.scores)
+    rather than re-summing the full check history on every scoreboard render.
     """
-    if not sla_config.dynamic_enabled:
-        # No dynamic scoring - use simple sum
-        return dict(
-            db.session.query(Service.team_id, func.sum(Service.points))
-            .join(Check)
-            .filter(Check.result.is_(True))
-            .group_by(Service.team_id)
-            .all()
-        )
+    from scoring_engine.scores import team_service_scores
 
-    # Query scores grouped by team and round
-    round_scores = (
-        db.session.query(
-            Service.team_id,
-            Check.round_id,
-            func.sum(Service.points).label("round_score"),
-        )
-        .join(Check)
-        .filter(Check.result.is_(True))
-        .group_by(Service.team_id, Check.round_id)
-        .all()
-    )
-
-    # Get round numbers for each round_id
-    rounds = {r.id: r.number for r in db.session.query(Round.id, Round.number).all()}
-
-    # Calculate total with multipliers
-    team_scores = defaultdict(int)
-    for team_id, round_id, round_score in round_scores:
-        round_number = rounds.get(round_id, 0)
-        adjusted_score = apply_dynamic_scoring_to_round(round_number, round_score, sla_config)
-        team_scores[team_id] += adjusted_score
-
-    return dict(team_scores)
+    return team_service_scores(db.session, sla_config)
 
 
 @cache.memoize()

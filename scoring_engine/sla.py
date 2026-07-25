@@ -379,47 +379,12 @@ def calculate_team_base_score_with_dynamic(team, config=None):
     if not config.dynamic_enabled:
         return team.current_score
 
-    from sqlalchemy.sql import func
+    # Read per-round raw points from the materialized round_score table and apply
+    # the dynamic multiplier per round -- same result as the old full-history
+    # GROUP BY over checks, without the scan.
+    from scoring_engine.scores import team_dynamic_service_score
 
-    from scoring_engine.models.check import Check
-    from scoring_engine.models.round import Round
-    from scoring_engine.models.service import Service
-
-    # Single query with JOIN to get round scores with round numbers
-    # Previously queried ALL rounds which was very inefficient
-    round_scores = (
-        db.session.query(
-            Round.number,
-            func.sum(Service.points).label("round_score"),
-        )
-        .select_from(Check)
-        .join(Service, Check.service_id == Service.id)
-        .join(Round, Check.round_id == Round.id)
-        .filter(Service.team_id == team.id)
-        .filter(Check.result.is_(True))
-        .group_by(Round.number)
-        .all()
-    )
-
-    # Calculate total with multipliers
-    # Pre-fetch config values to avoid repeated attribute access in loop
-    total_score = 0
-    early_rounds = config.early_rounds
-    early_multiplier = config.early_multiplier
-    late_start = config.late_start_round
-    late_multiplier = config.late_multiplier
-
-    for round_number, round_score in round_scores:
-        # Inline multiplier calculation for performance
-        if round_number <= early_rounds:
-            multiplier = early_multiplier
-        elif round_number >= late_start:
-            multiplier = late_multiplier
-        else:
-            multiplier = 1.0
-        total_score += int(round_score * multiplier)
-
-    return total_score
+    return team_dynamic_service_score(db.session, team.id, config)
 
 
 def calculate_team_adjusted_score(team, config=None):
