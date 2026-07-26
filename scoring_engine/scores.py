@@ -164,6 +164,33 @@ def team_service_score(session, team_id):
     return int(total or 0)
 
 
+def team_adjustment_totals(session):
+    """Return ``{team_id: net_adjustment_points}`` for every team with adjustments.
+
+    Sum of the signed manual adjustments (bonuses positive, penalties negative)
+    from the append-only score_adjustment log. Teams with no adjustments are absent
+    (reads coalesce to zero).
+    """
+    from scoring_engine.models.score_adjustment import ScoreAdjustment
+
+    rows = (
+        session.query(ScoreAdjustment.team_id, func.sum(ScoreAdjustment.points)).group_by(ScoreAdjustment.team_id).all()
+    )
+    return {team_id: int(total or 0) for team_id, total in rows}
+
+
+def team_adjustment_total(session, team_id):
+    """Net manual adjustment points for one team (0 if none)."""
+    from scoring_engine.models.score_adjustment import ScoreAdjustment
+
+    total = (
+        session.query(func.coalesce(func.sum(ScoreAdjustment.points), 0))
+        .filter(ScoreAdjustment.team_id == team_id)
+        .scalar()
+    )
+    return int(total or 0)
+
+
 def get_flag_point_values():
     """Return ``(user_points, root_points)`` for captured flags from settings.
 

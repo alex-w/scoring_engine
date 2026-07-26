@@ -58,8 +58,11 @@ def _get_bar_data_cached(anonymize, show_both):
     Internal cached function for bar chart data.
     Cache key includes anonymize/show_both flags for separate caches per user type.
     """
+    from scoring_engine.scores import team_adjustment_totals
+
     sla_config = get_sla_config()
     current_scores = calculate_team_scores_with_dynamic_scoring(sla_config)
+    adjustments = team_adjustment_totals(db.session)
 
     inject_scores_visible = Setting.get_setting("inject_scores_visible")
     if inject_scores_visible and inject_scores_visible.value:
@@ -78,6 +81,7 @@ def _get_bar_data_cached(anonymize, show_both):
     team_scores = []
     team_inject_scores = []
     team_sla_penalties = []
+    team_adjustments = []
     team_adjusted_scores = []
 
     team_colors = []
@@ -91,12 +95,14 @@ def _get_bar_data_cached(anonymize, show_both):
         team_colors.append(blue_team.rgb_color)
         service_score = current_scores.get(blue_team.id, 0)
         inject_score = inject_scores.get(blue_team.id, 0)
+        adjustment = adjustments.get(blue_team.id, 0)
         team_scores.append(str(service_score))
         team_inject_scores.append(str(inject_score))
+        team_adjustments.append(str(adjustment))
 
         # Calculate SLA penalties if enabled
-        # Total base score includes both service and inject scores
-        total_base_score = service_score + inject_score
+        # Total base score includes service, inject, and manual adjustments
+        total_base_score = service_score + inject_score + adjustment
         if sla_config.sla_enabled:
             penalty = calculate_team_total_penalties(blue_team, sla_config)
             team_sla_penalties.append(str(penalty))
@@ -114,6 +120,7 @@ def _get_bar_data_cached(anonymize, show_both):
     team_data["service_scores"] = team_scores
     team_data["inject_scores"] = team_inject_scores
     team_data["sla_penalties"] = team_sla_penalties
+    team_data["adjustments"] = team_adjustments
     team_data["adjusted_scores"] = team_adjusted_scores
     team_data["sla_enabled"] = sla_config.sla_enabled
     return team_data

@@ -40,6 +40,7 @@ from scoring_engine.models.kb import KB
 from scoring_engine.models.property import Property
 from scoring_engine.models.round import Round
 from scoring_engine.models.round_score import RoundScore
+from scoring_engine.models.score_adjustment import ScoreAdjustment
 from scoring_engine.models.service import Service
 from scoring_engine.models.setting import Setting
 from scoring_engine.models.team import Team
@@ -1551,9 +1552,12 @@ def admin_rollback():
         return jsonify({"status": "error", "message": "No rounds exist to rollback"}), 400
 
     if round_number > current_round:
-        return jsonify(
-            {"status": "error", "message": f"round_number ({round_number}) exceeds current round ({current_round})"}
-        ), 400
+        return (
+            jsonify(
+                {"status": "error", "message": f"round_number ({round_number}) exceeds current round ({current_round})"}
+            ),
+            400,
+        )
 
     # Pause the engine to prevent race conditions during rollback
     was_paused = Setting.get_setting("engine_paused").value
@@ -1568,11 +1572,7 @@ def admin_rollback():
 
     try:
         # Revoke any pending Celery tasks for rounds being rolled back
-        task_kb_entries = (
-            db.session.query(KB)
-            .filter(KB.round_num >= round_number, KB.name == "task_ids")
-            .all()
-        )
+        task_kb_entries = db.session.query(KB).filter(KB.round_num >= round_number, KB.name == "task_ids").all()
         revoked_count = 0
         for kb_entry in task_kb_entries:
             try:
@@ -1707,4 +1707,78 @@ def admin_rollback_preview():
                 "round_scores": round_scores_count,
             },
         }
+    )
+
+
+@mod.route("/api/admin/adjustments", methods=["GET"])
+@login_required
+def admin_get_adjustments():
+    """List all manual score adjustments (append-only audit log), newest first."""
+    if not current_user.is_white_team:
+        return jsonify({"status": "Unauthorized"}), 403
+
+    rows = (
+        db.session.query(ScoreAdjustment).order_by(ScoreAdjustment.created_at.desc(), ScoreAdjustment.id.desc()).all()
+    )
+    data = [
+        {
+            "id": adj.id,
+            "team": adj.team.name if adj.team else None,
+            "team_id": adj.team_id,
+            "points": adj.points,
+            "reason": adj.reason,
+            "author": adj.author.username if adj.author else None,
+            "created_at": ensure_utc_aware(adj.created_at).isoformat() if adj.created_at else None,
+        }
+        for adj in rows
+    ]
+    return jsonify(data=data)
+
+
+@mod.route("/api/admin/adjustments", methods=["POST"])
+@login_required
+def admin_create_adjustment():
+    """Create a manual score adjustment (bonus or penalty) for a team.
+
+    Append-only: there is no edit or delete. To reverse an adjustment, add a
+    compensating one, so the audit trail stays complete.
+    """
+    if not current_user.is_white_team:
+        return jsonify({"status": "Unauthorized"}), 403
+
+    data = request.get_json(silent=True) or request.form
+    team_id = data.get("team_id")
+    points = data.get("points")
+    reason = (data.get("reason") or "").strip()
+
+    if team_id is None or points is None or not reason:
+        return jsonify({"status": "error", "message": "team_id, points, and reason are required"}), 400
+    try:
+        team_id = int(team_id)
+        points = int(points)
+    except (ValueError, TypeError):
+        return jsonify({"status": "error", "message": "team_id and points must be integers"}), 400
+
+    team = db.session.get(Team, team_id)
+    if team is None:
+        return jsonify({"status": "error", "message": "Team not found"}), 404
+
+    adjustment = ScoreAdjustment(team_id=team_id, points=points, reason=reason, author_id=current_user.id)
+    db.session.add(adjustment)
+    db.session.commit()
+
+    # The team's total changed; refresh the scoreboard caches.
+    update_scoreboard_data()
+
+    return (
+        jsonify(
+            {
+                "status": "success",
+                "id": adjustment.id,
+                "team": team.name,
+                "points": points,
+                "reason": reason,
+            }
+        ),
+        201,
     )
