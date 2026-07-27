@@ -15,6 +15,7 @@ from scoring_engine.models.inject import Inject, InjectRubricScore, RubricItem, 
 from scoring_engine.models.notifications import Notification
 from scoring_engine.models.round import Round
 from scoring_engine.models.service import Service
+from scoring_engine.scores import materialize_all_rounds
 from scoring_engine.models.setting import Setting
 from scoring_engine.models.team import Team
 from scoring_engine.models.announcement import Announcement
@@ -271,6 +272,15 @@ with app.app_context():
                 check.finished(result, reason, output, command)
                 db.session.add(check)
         db.session.commit()
+
+        # Materialize round_score for the simulated rounds. In production the
+        # engine writes these rows as each round closes, but example data is
+        # loaded statically without ever running the engine, and a fresh install
+        # stamps Alembic to head rather than running the 005 backfill -- so
+        # without this the round_score-backed scoreboard/overview read zero for
+        # every team even though the checks exist.
+        logger.info("Materializing round scores for the simulated rounds")
+        materialize_all_rounds(db.session)
 
         # Simulate Injects
         num_injects = randint(5, 15)
