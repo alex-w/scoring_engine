@@ -128,6 +128,11 @@ services:
       redis:
         condition: service_healthy
     restart: unless-stopped
+    # Run a real init as PID 1 (tini) so any orphaned check subprocesses get
+    # reaped. Without this the worker python is PID 1 and never reaps, so hung
+    # checks that get orphaned pile up as zombies. The process-group kill in
+    # execute_command stops most orphaning at the source; this is the backstop.
+    init: true
     networks:
       - default
     environment:
