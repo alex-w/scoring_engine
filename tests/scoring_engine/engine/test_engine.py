@@ -37,7 +37,7 @@ from scoring_engine.checks.winrm import WinRMCheck
 from scoring_engine.checks.wordpress import WordpressCheck
 from scoring_engine.db import db
 from scoring_engine.engine.basic_check import CHECK_SUCCESS_TEXT, CHECK_TIMED_OUT_TEXT
-from scoring_engine.engine.engine import Engine
+from scoring_engine.engine.engine import Engine, _utcnow
 from scoring_engine.models.check import Check
 from scoring_engine.models.environment import Environment
 from scoring_engine.models.kb import KB
@@ -1085,7 +1085,7 @@ class TestConsecutiveRoundFailureBound:
         engine = Engine()
         sleeps = self._record_sleeps(engine)
 
-        engine._sleep_after_failed_round(datetime.now(), consecutive_failures=99)
+        engine._sleep_after_failed_round(_utcnow(), consecutive_failures=99)
 
         assert sleeps == [engine.ROUND_FAILURE_BACKOFF_MAX]
 
@@ -1099,6 +1099,17 @@ class TestConsecutiveRoundFailureBound:
         engine = Engine()
         sleeps = self._record_sleeps(engine)
 
-        engine._sleep_after_failed_round(datetime.now(), consecutive_failures=1)
+        engine._sleep_after_failed_round(_utcnow(), consecutive_failures=1)
 
         assert sleeps == [120]
+
+
+class TestUtcNow:
+    def test_returns_naive_utc(self):
+        from datetime import timezone
+
+        now = _utcnow()
+        assert now.tzinfo is None  # naive
+        # Within a couple seconds of real UTC (not local time).
+        delta = abs((datetime.now(timezone.utc).replace(tzinfo=None) - now).total_seconds())
+        assert delta < 5

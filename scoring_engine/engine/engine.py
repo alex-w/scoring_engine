@@ -8,7 +8,7 @@ import re
 import signal
 import sys
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 from functools import partial
 from pathlib import Path
 
@@ -31,6 +31,18 @@ from scoring_engine.models.round_score import RoundScore
 from scoring_engine.models.property import Property
 from scoring_engine.models.service import Service
 from scoring_engine.models.setting import Setting
+
+
+def _utcnow():
+    """Current time as a naive UTC datetime.
+
+    The round timestamps must be UTC to match how they are stored/compared
+    everywhere else (the round model default, the display localizers, and the
+    wall-clock scoreboard freeze all assume naive UTC). Plain ``datetime.now()``
+    is the container's *local* time, which only coincides with UTC when the
+    container clock happens to be UTC.
+    """
+    return datetime.now(timezone.utc).replace(tzinfo=None)
 
 
 def engine_sigint_handler(signum, frame, engine):
@@ -418,7 +430,7 @@ class Engine(object):
         except Exception:
             # The database is probably what failed in the first place.
             target_round_time = 60
-        round_delta = target_round_time - (datetime.now() - round_start_time).seconds
+        round_delta = target_round_time - (_utcnow() - round_start_time).seconds
         # The exponent is clamped as well as the result: with the bound
         # disabled the failure count is unbounded, and 2 ** (a few thousand) is
         # an expensive way to arrive at a number we are about to throw away.
@@ -465,7 +477,7 @@ class Engine(object):
 
             self.current_round += 1
             logger.info("Running round: " + str(self.current_round))
-            round_start_time = datetime.now()
+            round_start_time = _utcnow()
             self.round_running = True
             self.rounds_run += 1
 
@@ -694,7 +706,7 @@ class Engine(object):
                         )
                         self.db.session.add(check)
                 logger.info("Processed %d check results, committing to database", total_tasks)
-                round_end_time = datetime.now()
+                round_end_time = _utcnow()
                 round_obj.round_end = round_end_time
 
                 # Materialize per-team score facts from the sums accumulated above,
@@ -787,7 +799,7 @@ class Engine(object):
 
             if not self.is_last_round():
                 target_round_time = int(Setting.get_setting("target_round_time").value)
-                round_duration = (datetime.now() - round_start_time).seconds
+                round_duration = (_utcnow() - round_start_time).seconds
                 round_delta = target_round_time - round_duration
                 if round_delta > 0:
                     logger.info(
