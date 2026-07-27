@@ -193,7 +193,10 @@ def overview_get_data():
         # materialized round_score table -- no full-history scan per render.
         from scoring_engine.scores import team_service_scores
 
-        team_scores = team_service_scores(db.session, sla_config)
+        from . import get_effective_freeze
+
+        _, freeze_time = get_effective_freeze()
+        team_scores = team_service_scores(db.session, sla_config, freeze_time=freeze_time)
 
         # Calculate adjusted scores with SLA penalties
         adjusted_scores_dict = {}

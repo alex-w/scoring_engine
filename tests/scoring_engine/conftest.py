@@ -74,6 +74,7 @@ def _insert_default_settings():
         ("inject_scores_visible", False),
         ("flag_points_user", "100"),
         ("flag_points_root", "200"),
+        ("scoreboard_freeze_time", ""),
     ]
     for name, value in settings:
         db.session.add(Setting(name=name, value=value))

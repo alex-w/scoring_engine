@@ -16,6 +16,7 @@ from sqlalchemy.sql import func
 from scoring_engine.cache_helper import (
     update_all_cache,
     update_all_inject_data,
+    update_flags_data,
     update_inject_comments,
     update_inject_data,
     update_overview_data,
@@ -1782,3 +1783,55 @@ def admin_create_adjustment():
         ),
         201,
     )
+
+
+@mod.route("/api/admin/freeze", methods=["GET"])
+@login_required
+def admin_get_freeze():
+    """Return the current scoreboard freeze setting (raw UTC ISO, or null)."""
+    if not current_user.is_white_team:
+        return jsonify({"status": "Unauthorized"}), 403
+    setting = Setting.get_setting("scoreboard_freeze_time")
+    value = setting.value if setting else None
+    return jsonify(freeze_time=value or None)
+
+
+@mod.route("/api/admin/freeze", methods=["POST"])
+@login_required
+def admin_set_freeze():
+    """Set or clear the wall-clock scoreboard freeze.
+
+    Accepts ``freeze_time`` as an ISO datetime. A naive value (no offset) is
+    interpreted in the competition timezone (config.timezone), matching how times
+    are displayed everywhere else. An empty value clears the freeze. Stored as a
+    naive-UTC ISO string.
+    """
+    if not current_user.is_white_team:
+        return jsonify({"status": "Unauthorized"}), 403
+
+    data = request.get_json(silent=True) or request.form
+    raw = (data.get("freeze_time") or "").strip()
+
+    if not raw:
+        value = ""
+    else:
+        try:
+            dt = parse(raw)
+        except (ValueError, TypeError, OverflowError):
+            return jsonify({"status": "error", "message": "Invalid datetime"}), 400
+        if dt.tzinfo is None:
+            dt = pytz.timezone(config.timezone).localize(dt)
+        value = dt.astimezone(pytz.utc).replace(tzinfo=None).isoformat()
+
+    setting = Setting.get_setting("scoreboard_freeze_time")
+    setting.value = value
+    db.session.add(setting)
+    db.session.commit()
+    Setting.clear_cache("scoreboard_freeze_time")
+
+    # Freeze changes what every non-white viewer sees; refresh the standings caches.
+    update_scoreboard_data()
+    update_overview_data()
+    update_flags_data()
+
+    return jsonify({"status": "success", "freeze_time": value or None})

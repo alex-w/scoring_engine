@@ -24,6 +24,40 @@ from scoring_engine.models.round_score import RoundScore
 from scoring_engine.models.service import Service
 
 
+def get_freeze_time():
+    """Return the scoreboard freeze time as a naive-UTC datetime, or None.
+
+    Stored in the ``scoreboard_freeze_time`` setting as an ISO string (empty when
+    not frozen). Normalized to naive UTC to compare against the naive-UTC datetimes
+    the app stores (round_end, graded, created_at).
+    """
+    import pytz
+    from dateutil.parser import parse
+
+    from scoring_engine.models.setting import Setting
+
+    setting = Setting.get_setting("scoreboard_freeze_time")
+    value = setting.value if setting else None
+    if not value:
+        return None
+    try:
+        dt = parse(str(value))
+    except (ValueError, TypeError, OverflowError):
+        return None
+    if dt.tzinfo is not None:
+        dt = dt.astimezone(pytz.utc).replace(tzinfo=None)
+    return dt
+
+
+def _round_freeze_filter(query, freeze_time):
+    """Restrict a round_score query to rounds that closed at/before the freeze."""
+    if freeze_time is None:
+        return query
+    from scoring_engine.models.round import Round
+
+    return query.join(Round, Round.id == RoundScore.round_id).filter(Round.round_end <= freeze_time)
+
+
 def compute_round_service_points(session, round_id):
     """Return ``{team_id: service_points}`` for a single round.
 
@@ -113,13 +147,16 @@ def materialize_all_rounds(session, commit=True):
     return total
 
 
-def team_service_scores(session, sla_config=None):
+def team_service_scores(session, sla_config=None, freeze_time=None):
     """Return ``{team_id: service_score}`` for all teams, read from round_score.
 
     Replaces the full-history ``SUM(Service.points) JOIN checks GROUP BY team``
     scans on the scoreboard and overview. Dynamic scoring, when enabled, is applied
     per round from the stored raw points and ``round_number`` -- exactly as the old
     per-round path did -- so behaviour is unchanged.
+
+    ``freeze_time`` (naive UTC) restricts the total to rounds that closed at/before
+    that instant -- the wall-clock scoreboard freeze.
     """
     from scoring_engine.sla import apply_dynamic_scoring_to_round, get_sla_config
 
@@ -127,55 +164,58 @@ def team_service_scores(session, sla_config=None):
         sla_config = get_sla_config()
 
     if not sla_config.dynamic_enabled:
-        return all_team_service_scores(session)
+        return all_team_service_scores(session, freeze_time=freeze_time)
 
     # Dynamic: each round_score row already holds a team's per-round total, so apply
     # the multiplier per row keyed on the stored round_number.
     scores = {}
-    rows = session.query(RoundScore.team_id, RoundScore.round_number, RoundScore.service_points).all()
-    for team_id, round_number, service_points in rows:
+    query = session.query(RoundScore.team_id, RoundScore.round_number, RoundScore.service_points)
+    query = _round_freeze_filter(query, freeze_time)
+    for team_id, round_number, service_points in query.all():
         scores[team_id] = scores.get(team_id, 0) + apply_dynamic_scoring_to_round(
             round_number, service_points, sla_config
         )
     return scores
 
 
-def all_team_service_scores(session):
+def all_team_service_scores(session, freeze_time=None):
     """Raw ``{team_id: service_score}`` for every team, no dynamic multiplier.
 
     Backs ``Team.place`` (raw ranking) and the non-dynamic branch of
-    :func:`team_service_scores`.
+    :func:`team_service_scores`. ``freeze_time`` restricts to rounds closed at/before
+    the freeze.
     """
-    rows = session.query(RoundScore.team_id, func.sum(RoundScore.service_points)).group_by(RoundScore.team_id).all()
+    query = session.query(RoundScore.team_id, func.sum(RoundScore.service_points))
+    query = _round_freeze_filter(query, freeze_time)
+    rows = query.group_by(RoundScore.team_id).all()
     return {team_id: int(total or 0) for team_id, total in rows}
 
 
-def team_service_score(session, team_id):
+def team_service_score(session, team_id, freeze_time=None):
     """Raw (un-weighted, un-multiplied) service score for one team from round_score.
 
     Matches the historical semantics of ``Team.current_score`` -- callers that want
     dynamic scoring go through :func:`team_service_scores`.
     """
-    total = (
-        session.query(func.coalesce(func.sum(RoundScore.service_points), 0))
-        .filter(RoundScore.team_id == team_id)
-        .scalar()
-    )
-    return int(total or 0)
+    query = session.query(func.coalesce(func.sum(RoundScore.service_points), 0)).filter(RoundScore.team_id == team_id)
+    query = _round_freeze_filter(query, freeze_time)
+    return int(query.scalar() or 0)
 
 
-def team_adjustment_totals(session):
+def team_adjustment_totals(session, freeze_time=None):
     """Return ``{team_id: net_adjustment_points}`` for every team with adjustments.
 
     Sum of the signed manual adjustments (bonuses positive, penalties negative)
     from the append-only score_adjustment log. Teams with no adjustments are absent
-    (reads coalesce to zero).
+    (reads coalesce to zero). ``freeze_time`` restricts to adjustments created
+    at/before the freeze.
     """
     from scoring_engine.models.score_adjustment import ScoreAdjustment
 
-    rows = (
-        session.query(ScoreAdjustment.team_id, func.sum(ScoreAdjustment.points)).group_by(ScoreAdjustment.team_id).all()
-    )
+    query = session.query(ScoreAdjustment.team_id, func.sum(ScoreAdjustment.points))
+    if freeze_time is not None:
+        query = query.filter(ScoreAdjustment.created_at <= freeze_time)
+    rows = query.group_by(ScoreAdjustment.team_id).all()
     return {team_id: int(total or 0) for team_id, total in rows}
 
 
@@ -209,14 +249,15 @@ def get_flag_point_values():
     return _int("flag_points_user", 100), _int("flag_points_root", 200)
 
 
-def flag_points_by_team(session, user_points=None, root_points=None):
+def flag_points_by_team(session, user_points=None, root_points=None, freeze_time=None):
     """Return ``{blue_team_id: captured_flag_value}`` -- each team's flag exposure.
 
     A captured flag is a non-dummy ``Solve`` (a blue team's agent reported a red
     flag present on one of its hosts). Each is worth ``root_points`` when the flag
     is a root flag, else ``user_points``. This is the value the red team earns for
     compromising that team; per the "add to red only" rule the blue team's own
-    score is unaffected.
+    score is unaffected. ``freeze_time`` restricts to solves recorded at/before the
+    freeze.
     """
     from scoring_engine.models.flag import Flag, Solve
 
@@ -225,13 +266,14 @@ def flag_points_by_team(session, user_points=None, root_points=None):
         user_points = cfg_user if user_points is None else user_points
         root_points = cfg_root if root_points is None else root_points
 
-    rows = (
+    query = (
         session.query(Solve.team_id, Flag.perm, func.count())
         .join(Flag, Flag.id == Solve.flag_id)
         .filter(Flag.dummy.is_(False))
-        .group_by(Solve.team_id, Flag.perm)
-        .all()
     )
+    if freeze_time is not None:
+        query = query.filter(Solve.created_at <= freeze_time)
+    rows = query.group_by(Solve.team_id, Flag.perm).all()
     result = {}
     for team_id, perm, count in rows:
         perm_value = perm.value if hasattr(perm, "value") else perm
@@ -240,13 +282,13 @@ def flag_points_by_team(session, user_points=None, root_points=None):
     return result
 
 
-def red_team_flag_total(session, user_points=None, root_points=None):
+def red_team_flag_total(session, user_points=None, root_points=None, freeze_time=None):
     """Total red-team flag score: the sum of every blue team's captured-flag value.
 
     The red team scores by compromising anyone, so its total is the sum across all
     blue teams (a handful of red teams share this pool today).
     """
-    return sum(flag_points_by_team(session, user_points, root_points).values())
+    return sum(flag_points_by_team(session, user_points, root_points, freeze_time=freeze_time).values())
 
 
 def team_dynamic_service_score(session, team_id, sla_config):

@@ -1,4 +1,5 @@
 from collections import defaultdict
+from datetime import datetime, timezone
 from itertools import accumulate
 
 from flask import jsonify
@@ -38,7 +39,7 @@ def get_anonymize_mode():
     return (True, False)
 
 
-def calculate_team_scores_with_dynamic_scoring(sla_config):
+def calculate_team_scores_with_dynamic_scoring(sla_config, freeze_time=None):
     """
     Calculate team scores with dynamic scoring multipliers applied per-round.
 
@@ -46,33 +47,39 @@ def calculate_team_scores_with_dynamic_scoring(sla_config):
 
     Reads from the materialized round_score table (see scoring_engine.scores)
     rather than re-summing the full check history on every scoreboard render.
+    ``freeze_time`` restricts to rounds closed at/before the wall-clock freeze.
     """
     from scoring_engine.scores import team_service_scores
 
-    return team_service_scores(db.session, sla_config)
+    return team_service_scores(db.session, sla_config, freeze_time=freeze_time)
 
 
 @cache.memoize()
-def _get_bar_data_cached(anonymize, show_both):
+def _get_bar_data_cached(anonymize, show_both, frozen_view=False):
     """
     Internal cached function for bar chart data.
-    Cache key includes anonymize/show_both flags for separate caches per user type.
+    Cache key includes anonymize/show_both/frozen_view flags for separate caches
+    per user type (frozen_view distinguishes the white/live view from the frozen
+    public view, which anonymize/show_both alone do not when anonymization is off).
     """
-    from scoring_engine.scores import team_adjustment_totals
+    from scoring_engine.scores import get_freeze_time, team_adjustment_totals
+
+    freeze_time = get_freeze_time() if frozen_view else None
 
     sla_config = get_sla_config()
-    current_scores = calculate_team_scores_with_dynamic_scoring(sla_config)
-    adjustments = team_adjustment_totals(db.session)
+    current_scores = calculate_team_scores_with_dynamic_scoring(sla_config, freeze_time=freeze_time)
+    adjustments = team_adjustment_totals(db.session, freeze_time=freeze_time)
 
     inject_scores_visible = Setting.get_setting("inject_scores_visible")
     if inject_scores_visible and inject_scores_visible.value:
-        inject_scores = dict(
+        inject_query = (
             db.session.query(Inject.team_id, func.sum(InjectRubricScore.score))
             .join(InjectRubricScore)
             .filter(Inject.status == "Graded")
-            .group_by(Inject.team_id)
-            .all()
         )
+        if freeze_time is not None:
+            inject_query = inject_query.filter(Inject.graded <= freeze_time)
+        inject_scores = dict(inject_query.group_by(Inject.team_id).all())
     else:
         inject_scores = {}
 
@@ -127,11 +134,16 @@ def _get_bar_data_cached(anonymize, show_both):
 
 
 @cache.memoize()
-def _get_line_data_cached(anonymize, show_both):
+def _get_line_data_cached(anonymize, show_both, frozen_view=False):
     """
     Internal cached function for line chart data.
-    Cache key includes anonymize/show_both flags for separate caches per user type.
+    Cache key includes anonymize/show_both/frozen_view flags for separate caches
+    per user type.
     """
+    from scoring_engine.scores import get_freeze_time
+
+    freeze_time = get_freeze_time() if frozen_view else None
+
     last_round = Round.get_last_round_num()
     sla_config = get_sla_config()
 
@@ -148,11 +160,10 @@ def _get_line_data_cached(anonymize, show_both):
     # full-history scan, no round_id->number lookup -- the number is stored).
     from scoring_engine.models.round_score import RoundScore
 
-    round_scores = (
-        db.session.query(RoundScore.team_id, RoundScore.round_number, RoundScore.service_points)
-        .order_by(RoundScore.team_id, RoundScore.round_number)
-        .all()
-    )
+    round_query = db.session.query(RoundScore.team_id, RoundScore.round_number, RoundScore.service_points)
+    if freeze_time is not None:
+        round_query = round_query.join(Round, Round.id == RoundScore.round_id).filter(Round.round_end <= freeze_time)
+    round_scores = round_query.order_by(RoundScore.team_id, RoundScore.round_number).all()
 
     scores_dict = defaultdict(lambda: defaultdict(int))
     for team_id, round_number, round_score in round_scores:
@@ -174,15 +185,52 @@ def _get_line_data_cached(anonymize, show_both):
     return team_data
 
 
+@mod.route("/api/scoreboard/freeze_status")
+def scoreboard_freeze_status():
+    """Report whether the scoreboard is frozen, for the banner + countdown.
+
+    Returns the freeze instant and the current server time as epoch seconds so the
+    client can render a countdown that does not depend on the viewer's clock being
+    correct -- the whole point of a countdown across timezones. Public: the banner
+    shows to everyone; only the white team's data stays live (``white_live``).
+    """
+    import pytz
+
+    from scoring_engine.config import config
+    from scoring_engine.datetime_utils import ensure_utc_aware
+    from scoring_engine.scores import get_freeze_time
+
+    freeze_time = get_freeze_time()
+    if freeze_time is None:
+        return jsonify(frozen=False)
+
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
+    is_white = current_user.is_authenticated and current_user.is_white_team
+    display = ensure_utc_aware(freeze_time).astimezone(pytz.timezone(config.timezone)).strftime("%Y-%m-%d %H:%M:%S %Z")
+    return jsonify(
+        frozen=True,
+        white_live=is_white,
+        freeze_epoch=int(ensure_utc_aware(freeze_time).timestamp()),
+        server_epoch=int(ensure_utc_aware(now).timestamp()),
+        freeze_display=display,
+    )
+
+
 @mod.route("/api/scoreboard/get_bar_data")
 def scoreboard_get_bar_data():
-    """Get bar chart data. Cached separately by user type."""
+    """Get bar chart data. Cached separately by user type and freeze view."""
+    from . import get_effective_freeze
+
     anonymize, show_both = get_anonymize_mode()
-    return jsonify(_get_bar_data_cached(anonymize, show_both))
+    frozen_view, _ = get_effective_freeze()
+    return jsonify(_get_bar_data_cached(anonymize, show_both, frozen_view))
 
 
 @mod.route("/api/scoreboard/get_line_data")
 def scoreboard_get_line_data():
-    """Get line chart data. Cached separately by user type."""
+    """Get line chart data. Cached separately by user type and freeze view."""
+    from . import get_effective_freeze
+
     anonymize, show_both = get_anonymize_mode()
-    return jsonify(_get_line_data_cached(anonymize, show_both))
+    frozen_view, _ = get_effective_freeze()
+    return jsonify(_get_line_data_cached(anonymize, show_both, frozen_view))

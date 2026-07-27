@@ -1,6 +1,7 @@
 import enum
 import html
 import uuid
+from datetime import datetime, timezone
 
 import pytz
 from sqlalchemy import JSON, Boolean, Column, DateTime, Enum, ForeignKey, Index, Integer, String, UniqueConstraint
@@ -94,5 +95,8 @@ class Solve(Base):
     host = Column(String(260), nullable=False)
     flag_id = Column(String(36), ForeignKey("flags.id"))
     team_id = Column(Integer, ForeignKey("teams.id"))
+    # When the capture was recorded. Basis for the wall-clock scoreboard freeze:
+    # a frozen view counts only solves created at/before the freeze time.
+    created_at = Column(DateTime, nullable=True, default=lambda: datetime.now(timezone.utc).replace(tzinfo=None))
     flag = relationship("Flag", backref="solves", lazy="joined")
     team = relationship("Team", backref="flag_solves", lazy="joined")

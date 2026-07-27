@@ -29,8 +29,9 @@ from scoring_engine.web import (
 parser = optparse.OptionParser()
 parser.add_option("--overwrite-db", action="store_true", default=False)
 parser.add_option("--example", action="store_true", default=False)
-parser.add_option("--announcements", type="int", default=8,
-                  help="Number of sample announcements to generate (default: 8)")
+parser.add_option(
+    "--announcements", type="int", default=8, help="Number of sample announcements to generate (default: 8)"
+)
 
 options, arguments = parser.parse_args()
 
@@ -199,13 +200,14 @@ with app.app_context():
     # Welcome Page Configuration
     logger.info("Creating the Welcome Page Configuration")
     import json
+
     welcome_config = {
         "welcome_message": "<h2 class='text-center'>Welcome to the Competition!</h2><p class='text-center lead'>Good luck to all teams. Check back here for updates and sponsor information.</p>",
         "sponsor_tiers": [
             {"name": "Diamond", "display_order": 1, "sponsors": []},
             {"name": "Platinum", "display_order": 2, "sponsors": []},
             {"name": "Gold", "display_order": 3, "sponsors": []},
-        ]
+        ],
     }
     db.session.add(Setting(name="welcome_config", value=json.dumps(welcome_config)))
 
@@ -216,6 +218,9 @@ with app.app_context():
     # Red-team flag scoring (flat points per captured flag by permission level)
     db.session.add(Setting(name="flag_points_user", value=str(config.flag_points_user)))
     db.session.add(Setting(name="flag_points_root", value=str(config.flag_points_root)))
+
+    # Wall-clock scoreboard freeze (empty = not frozen; set at runtime by white team)
+    db.session.add(Setting(name="scoreboard_freeze_time", value=""))
 
     db.session.commit()
 
@@ -417,25 +422,29 @@ with app.app_context():
         ]
         # Add a team-specific announcement if there are blue teams
         if len(blue_team_ids) >= 2:
-            sample_announcements.append({
-                "title": "DNS Issue Resolved",
-                "content": (
-                    "<p>The DNS resolution issue affecting your team has been resolved. "
-                    "Please verify your DNS service is passing checks.</p>"
-                ),
-                "audience": f"team:{blue_team_ids[0]}",
-                "is_pinned": False,
-            })
-            sample_announcements.append({
-                "title": "Scoring Adjustment",
-                "content": (
-                    "<p>A scoring adjustment has been applied to your teams due to "
-                    "the infrastructure issue earlier. Two failed checks have been "
-                    "marked as passing.</p>"
-                ),
-                "audience": f"teams:{blue_team_ids[0]},{blue_team_ids[1]}",
-                "is_pinned": False,
-            })
+            sample_announcements.append(
+                {
+                    "title": "DNS Issue Resolved",
+                    "content": (
+                        "<p>The DNS resolution issue affecting your team has been resolved. "
+                        "Please verify your DNS service is passing checks.</p>"
+                    ),
+                    "audience": f"team:{blue_team_ids[0]}",
+                    "is_pinned": False,
+                }
+            )
+            sample_announcements.append(
+                {
+                    "title": "Scoring Adjustment",
+                    "content": (
+                        "<p>A scoring adjustment has been applied to your teams due to "
+                        "the infrastructure issue earlier. Two failed checks have been "
+                        "marked as passing.</p>"
+                    ),
+                    "audience": f"teams:{blue_team_ids[0]},{blue_team_ids[1]}",
+                    "is_pinned": False,
+                }
+            )
 
         # Slice to requested count, or cycle if more requested than available
         num_announcements = options.announcements
@@ -444,7 +453,9 @@ with app.app_context():
         else:
             selected_announcements = list(sample_announcements)
             while len(selected_announcements) < num_announcements:
-                selected_announcements.append(sample_announcements[len(selected_announcements) % len(sample_announcements)])
+                selected_announcements.append(
+                    sample_announcements[len(selected_announcements) % len(sample_announcements)]
+                )
 
         for ann_data in selected_announcements:
             announcement = Announcement(

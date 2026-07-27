@@ -244,8 +244,11 @@ def api_flags_score():
 
     from scoring_engine.scores import flag_points_by_team, get_flag_point_values
 
+    from . import get_effective_freeze
+
+    _, freeze_time = get_effective_freeze()
     user_points, root_points = get_flag_point_values()
-    by_team_id = flag_points_by_team(db.session, user_points, root_points)
+    by_team_id = flag_points_by_team(db.session, user_points, root_points, freeze_time=freeze_time)
 
     blue_teams = db.session.query(Team).filter(Team.color == "Blue").order_by(Team.id).all()
     by_team = [{"team": team.name, "points": by_team_id.get(team.id, 0)} for team in blue_teams]

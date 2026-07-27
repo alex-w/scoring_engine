@@ -16,6 +16,16 @@
         </div>
     </div>
 
+    <!-- Scoreboard freeze banner (hidden unless a freeze is set) -->
+    <div id="sc-freeze-banner" class="alert alert-warning d-none" role="status"
+         style="display:flex; align-items:center; gap:.6rem;">
+        <i class="bi bi-snow2" style="font-size:1.3rem;"></i>
+        <div>
+            <strong id="sc-freeze-headline"></strong>
+            <div class="small" id="sc-freeze-detail"></div>
+        </div>
+    </div>
+
     <!-- Stat Cards -->
     <div class="stat-cards-row">
         <div class="stat-card animate-in">
@@ -315,6 +325,61 @@
             });
         });
         observer.observe(document.documentElement, { attributes: true });
+    </script>
+
+    <script>
+    // Scoreboard freeze banner + countdown. The countdown is driven off the
+    // server's clock (freeze_epoch vs server_epoch) plus elapsed browser time, so
+    // it stays correct even if the viewer's clock or timezone is wrong -- which is
+    // exactly the case a countdown is meant to make easy to sanity-check.
+    (function () {
+      var banner = document.getElementById('sc-freeze-banner');
+      var headline = document.getElementById('sc-freeze-headline');
+      var detail = document.getElementById('sc-freeze-detail');
+      var state = null;       // {freeze_epoch, server_epoch, freeze_display, white_live}
+      var fetchedAt = null;   // browser ms when we got `state`
+
+      function fmt(sec) {
+        sec = Math.max(0, Math.floor(sec));
+        var h = Math.floor(sec / 3600), m = Math.floor((sec % 3600) / 60), s = sec % 60;
+        var p = function (n) { return (n < 10 ? '0' : '') + n; };
+        return (h > 0 ? h + 'h ' : '') + p(m) + 'm ' + p(s) + 's';
+      }
+
+      function render() {
+        if (!state) { banner.classList.add('d-none'); return; }
+        banner.classList.remove('d-none');
+        // server "now" = server_epoch at fetch + elapsed browser time since fetch
+        var serverNow = state.server_epoch + (Date.now() - fetchedAt) / 1000;
+        var remaining = state.freeze_epoch - serverNow;
+        if (remaining > 0) {
+          headline.textContent = 'Scoreboard freezes in ' + fmt(remaining);
+          detail.textContent = 'at ' + state.freeze_display
+            + (state.white_live ? ' — you (white team) will keep seeing live scores' : '');
+        } else {
+          headline.textContent = state.white_live
+            ? 'Scoreboard is FROZEN for competitors (you see live)'
+            : 'Scoreboard is FROZEN';
+          detail.textContent = 'Standings shown as of ' + state.freeze_display;
+        }
+      }
+
+      function refresh() {
+        // csrf-safe: read only
+        fetch('/api/scoreboard/freeze_status', { credentials: 'same-origin' })
+          .then(function (r) { return r.json(); })
+          .then(function (d) {
+            state = d && d.frozen ? d : null;
+            fetchedAt = Date.now();
+            render();
+          })
+          .catch(function () { /* leave last state */ });
+      }
+
+      refresh();
+      setInterval(render, 1000);   // tick the countdown
+      setInterval(refresh, 30000); // pick up admin set/clear
+    })();
     </script>
 </div>
 {% endblock %}
