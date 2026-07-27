@@ -12,7 +12,7 @@ from scoring_engine.models.inject import Inject, InjectRubricScore
 from scoring_engine.models.round import Round
 from scoring_engine.models.setting import Setting
 from scoring_engine.models.team import Team
-from scoring_engine.sla import apply_dynamic_scoring_to_round, calculate_team_total_penalties, get_sla_config
+from scoring_engine.sla import apply_dynamic_scoring_to_round, get_sla_config
 
 from . import mod
 
@@ -62,13 +62,16 @@ def _get_bar_data_cached(anonymize, show_both, frozen_view=False):
     per user type (frozen_view distinguishes the white/live view from the frozen
     public view, which anonymize/show_both alone do not when anonymization is off).
     """
-    from scoring_engine.scores import get_freeze_time, team_adjustment_totals
+    from scoring_engine.scores import get_freeze_time, team_adjustment_totals, team_penalties
 
     freeze_time = get_freeze_time() if frozen_view else None
 
     sla_config = get_sla_config()
     current_scores = calculate_team_scores_with_dynamic_scoring(sla_config, freeze_time=freeze_time)
     adjustments = team_adjustment_totals(db.session, freeze_time=freeze_time)
+    # All teams' SLA penalties in a couple of grouped queries, rather than the
+    # per-service check scan calculate_team_total_penalties runs one team at a time.
+    penalties = team_penalties(db.session, sla_config) if sla_config.sla_enabled else {}
 
     inject_scores_visible = Setting.get_setting("inject_scores_visible")
     if inject_scores_visible and inject_scores_visible.value:
@@ -132,7 +135,7 @@ def _get_bar_data_cached(anonymize, show_both, frozen_view=False):
         # Total base score includes (weighted) service, inject, and manual adjustments
         total_base_score = weighted_service + weighted_inject + adjustment
         if sla_config.sla_enabled:
-            penalty = calculate_team_total_penalties(blue_team, sla_config)
+            penalty = penalties.get(blue_team.id, 0)
             team_sla_penalties.append(str(penalty))
             if sla_config.allow_negative:
                 adjusted = total_base_score - penalty
@@ -177,6 +180,13 @@ def _get_line_data_cached(anonymize, show_both, frozen_view=False):
     last_round = Round.get_last_round_num()
     sla_config = get_sla_config()
 
+    # TODO(perf): downsample the line series. This returns one point per team per
+    # round, so the payload grows without bound as a competition runs -- measured
+    # ~2.4 MB at 100 teams x 3000 rounds. The query itself is cheap (indexed
+    # round_score); the cost is JSON size / transfer. Cap each series to ~N points
+    # (e.g. bucket rounds, or LTTB downsampling that preserves the visual shape)
+    # so the response stays flat regardless of round count. Keep the full series
+    # available to the white team / an export path if the fine grain is needed.
     team_data = {
         "team": [],
         "rounds": [f"Round {round}" for round in range(last_round + 1)],

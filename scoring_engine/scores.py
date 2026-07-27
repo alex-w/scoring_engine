@@ -17,6 +17,7 @@ Per-service reads (``Service.score_earned``/``rank``) and SLA consecutive-failur
 detection still read ``checks`` directly -- round_score is team-grained.
 """
 
+from sqlalchemy import and_, case, or_
 from sqlalchemy.sql import func
 
 from scoring_engine.models.check import Check
@@ -302,6 +303,133 @@ def red_team_flag_total(session, user_points=None, root_points=None, freeze_time
     blue teams (a handful of red teams share this pool today).
     """
     return sum(flag_points_by_team(session, user_points, root_points, freeze_time=freeze_time).values())
+
+
+def _service_consecutive_failures(session):
+    """Return ``{service_id: consecutive_failures}`` for every service, batched.
+
+    Consecutive failures = the run of failing *completed* checks from the most
+    recent round backwards, i.e. the completed failures in rounds after the
+    service's last passing round (all completed failures if it never passed).
+    Equivalent to ``sla.get_consecutive_failures`` per service, in one grouped
+    query instead of one-query-per-service.
+    """
+    last_pass = (
+        session.query(Check.service_id.label("sid"), func.max(Check.round_id).label("lpr"))
+        .filter(Check.completed.is_(True))
+        .filter(Check.result.is_(True))
+        .group_by(Check.service_id)
+        .subquery()
+    )
+    rows = (
+        session.query(Check.service_id, func.count())
+        .outerjoin(last_pass, last_pass.c.sid == Check.service_id)
+        .filter(Check.completed.is_(True))
+        .filter(Check.result.is_(False))
+        .filter(or_(last_pass.c.lpr.is_(None), Check.round_id > last_pass.c.lpr))
+        .group_by(Check.service_id)
+        .all()
+    )
+    return {sid: count for sid, count in rows}
+
+
+def _service_base_scores(session, config, points_by_service, service_ids):
+    """Return ``{service_id: earned base score}`` for the given services, batched.
+
+    Only the services passed in ``service_ids`` are queried -- the caller has
+    already narrowed to the handful that are actually over the penalty threshold,
+    so this never scans the whole (large) checks table for the 99% of services
+    that carry no penalty.
+
+    Matches ``sla.calculate_service_base_score_with_dynamic`` exactly:
+
+    - non-dynamic: ``count(passing checks) * points`` (``Service.score_earned``).
+    - dynamic: ``sum(int(points * multiplier))`` per passing check, where the
+      multiplier is the round bucket (early/mid/late). Because the multiplier is
+      constant within a bucket, ``sum`` over a bucket equals
+      ``count_bucket * int(points * multiplier)`` -- which reproduces the
+      original per-check integer truncation without a non-portable SQL FLOOR.
+    """
+    if not service_ids:
+        return {}
+
+    if not config.dynamic_enabled:
+        rows = (
+            session.query(Check.service_id, func.count())
+            .filter(Check.result.is_(True))
+            .filter(Check.service_id.in_(service_ids))
+            .group_by(Check.service_id)
+            .all()
+        )
+        return {sid: count * points_by_service.get(sid, 0) for sid, count in rows}
+
+    from scoring_engine.models.round import Round
+
+    early, late = config.early_rounds, config.late_start_round
+    # Buckets mirror the original elif chain: <= early wins first, then >= late.
+    early_c = func.sum(case((Round.number <= early, 1), else_=0))
+    mid_c = func.sum(case((and_(Round.number > early, Round.number < late), 1), else_=0))
+    late_c = func.sum(case((and_(Round.number > early, Round.number >= late), 1), else_=0))
+    rows = (
+        session.query(Check.service_id, early_c, mid_c, late_c)
+        .join(Round, Round.id == Check.round_id)
+        .filter(Check.result.is_(True))
+        .filter(Check.service_id.in_(service_ids))
+        .group_by(Check.service_id)
+        .all()
+    )
+    scores = {}
+    for sid, e, m, ln in rows:
+        p = points_by_service.get(sid, 0)
+        # SUM() comes back as Decimal on MySQL/MariaDB (int on SQLite); coerce so
+        # the later ``base * (percent / 100)`` is plain int/float arithmetic.
+        e, m, ln = int(e or 0), int(m or 0), int(ln or 0)
+        scores[sid] = e * int(p * config.early_multiplier) + m * p + ln * int(p * config.late_multiplier)
+    return scores
+
+
+def team_penalties(session, config):
+    """Return ``{team_id: total_sla_penalty}`` for every team, batched.
+
+    Replaces the per-service ``sla.calculate_team_total_penalties`` loop -- which
+    issued two check queries for *every* service (~20k queries at 100 teams x 100
+    services) -- with a handful of grouped queries. Produces byte-identical
+    penalties (guarded by an equivalence test); teams with no penalty are absent.
+
+    Order matters for cost: consecutive failures are computed for all services
+    first, but the (expensive) earned-score scan is then run only for the services
+    actually over the penalty threshold -- typically a tiny fraction. A service
+    with no penalty never has its base score queried.
+
+    Deliberately not freeze-aware, matching the existing penalty path (the frozen
+    public scoreboard already shows live penalties).
+    """
+    if not config.sla_enabled:
+        return {}
+
+    from scoring_engine.sla import calculate_sla_penalty_percent
+
+    consecutive = _service_consecutive_failures(session)
+    percents = {}
+    for service_id, failures in consecutive.items():
+        percent = calculate_sla_penalty_percent(failures, config)
+        if percent > 0:
+            percents[service_id] = percent
+    if not percents:
+        return {}
+
+    penalized_ids = list(percents)
+    points_by_service = dict(session.query(Service.id, Service.points).filter(Service.id.in_(penalized_ids)).all())
+    base_scores = _service_base_scores(session, config, points_by_service, penalized_ids)
+    service_team = dict(session.query(Service.id, Service.team_id).filter(Service.id.in_(penalized_ids)).all())
+
+    penalties = {}
+    for service_id, percent in percents.items():
+        penalty = int(base_scores.get(service_id, 0) * (percent / 100))
+        if penalty:
+            team_id = service_team.get(service_id)
+            penalties[team_id] = penalties.get(team_id, 0) + penalty
+    return penalties
 
 
 def team_dynamic_service_score(session, team_id, sla_config):

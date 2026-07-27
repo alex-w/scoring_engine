@@ -11,7 +11,7 @@ from scoring_engine.models.round import Round
 from scoring_engine.models.service import Service
 from scoring_engine.models.setting import Setting
 from scoring_engine.models.team import Team
-from scoring_engine.sla import calculate_team_total_penalties, get_sla_config
+from scoring_engine.sla import get_sla_config
 
 from . import make_cache_key, mod
 
@@ -151,7 +151,6 @@ def overview_get_data():
     data = []
     blue_teams = db.session.query(Team).filter(Team.color == "Blue").order_by(Team.id).all()
     blue_team_ids = [team.id for team in blue_teams]
-    blue_teams_dict = {team.id: team for team in blue_teams}
     last_round = Round.get_last_round_num()
 
     # Get SLA configuration
@@ -191,12 +190,14 @@ def overview_get_data():
     if len(blue_team_ids) > 0:
         # Team service scores (with dynamic multipliers when enabled) from the
         # materialized round_score table -- no full-history scan per render.
-        from scoring_engine.scores import team_service_scores
+        from scoring_engine.scores import team_penalties, team_service_scores
 
         from . import get_effective_freeze
 
         _, freeze_time = get_effective_freeze()
         team_scores = team_service_scores(db.session, sla_config, freeze_time=freeze_time)
+        # All teams' penalties in a couple of grouped queries (see scores.team_penalties).
+        penalties = team_penalties(db.session, sla_config) if sla_config.sla_enabled else {}
 
         # Calculate adjusted scores with SLA penalties
         adjusted_scores_dict = {}
@@ -204,8 +205,7 @@ def overview_get_data():
         for blue_team_id in blue_team_ids:
             base_score = team_scores.get(blue_team_id, 0)
             if sla_config.sla_enabled:
-                team = blue_teams_dict[blue_team_id]
-                penalty = calculate_team_total_penalties(team, sla_config)
+                penalty = penalties.get(blue_team_id, 0)
                 penalties_dict[blue_team_id] = penalty
                 if sla_config.allow_negative:
                     adjusted_scores_dict[blue_team_id] = base_score - penalty

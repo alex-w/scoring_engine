@@ -26,6 +26,12 @@ class Check(Base):
         # api/overview.py num_up_services / num_down_services and
         # api/admin.py round stats: WHERE round_id = ? AND result = ?.
         Index("ix_checks_round_id_result", "round_id", "result"),
+        # scores.team_penalties (batched SLA): the last-passing-round MAX and the
+        # trailing-failure COUNT both group by service_id and filter on
+        # completed/result with a round_id bound. Ordering the columns as
+        # (service_id, completed, result, round_id) lets both run as index-only
+        # loose scans instead of scanning the whole (huge) checks table.
+        Index("ix_checks_sla_scan", "service_id", "completed", "result", "round_id"),
     )
     id = Column(Integer, primary_key=True)
     round_id = Column(Integer, ForeignKey("rounds.id"))
