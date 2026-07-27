@@ -35,6 +35,7 @@ from scoring_engine.engine.engine import Engine
 from scoring_engine.engine.execute_command import execute_command
 from scoring_engine.events import publish_event
 from scoring_engine.models.check import Check
+from scoring_engine.models.competition_window import CompetitionWindow
 from scoring_engine.models.environment import Environment
 from scoring_engine.models.inject import Inject, InjectComment, InjectRubricScore, RubricItem, Template
 from scoring_engine.models.kb import KB
@@ -48,6 +49,7 @@ from scoring_engine.models.team import Team
 from scoring_engine.models.user import User
 from scoring_engine.models.welcome import get_welcome_config, save_welcome_config
 from scoring_engine.notifications import notify_inject_graded, notify_revision_requested
+from scoring_engine.schedule import clear_windows_cache
 
 from . import mod
 
@@ -1835,3 +1837,108 @@ def admin_set_freeze():
     update_flags_data()
 
     return jsonify({"status": "success", "freeze_time": value or None})
+
+
+def _parse_competition_time(raw):
+    """Parse an operator-entered datetime into a naive-UTC datetime, or None.
+
+    A naive value (no offset) is interpreted in the competition timezone
+    (``config.timezone``), matching how the freeze is parsed and how times are
+    displayed everywhere else. Returns None on empty or unparseable input.
+    """
+    raw = (raw or "").strip()
+    if not raw:
+        return None
+    try:
+        dt = parse(raw)
+    except (ValueError, TypeError, OverflowError):
+        return None
+    if dt.tzinfo is None:
+        dt = pytz.timezone(config.timezone).localize(dt)
+    return dt.astimezone(pytz.utc).replace(tzinfo=None)
+
+
+def _refresh_after_window_change():
+    """Invalidate the schedule cache and the standings caches a window affects."""
+    clear_windows_cache()
+    update_scoreboard_data()
+    update_overview_data()
+    update_flags_data()
+
+
+@mod.route("/api/admin/windows", methods=["GET"])
+@login_required
+def admin_get_windows():
+    """List competition windows (white team only), in schedule order."""
+    if not current_user.is_white_team:
+        return jsonify({"status": "Unauthorized"}), 403
+    windows = db.session.query(CompetitionWindow).order_by(CompetitionWindow.start_time).all()
+    return jsonify(windows=[w.to_dict() for w in windows])
+
+
+@mod.route("/api/admin/windows", methods=["POST"])
+@login_required
+def admin_create_window():
+    """Create a competition window.
+
+    Accepts ``name`` (optional), ``start_time`` and ``end_time`` as ISO datetimes.
+    Naive values are interpreted in the competition timezone; stored naive-UTC.
+    Rejects a window whose end is not strictly after its start.
+    """
+    if not current_user.is_white_team:
+        return jsonify({"status": "Unauthorized"}), 403
+
+    data = request.get_json(silent=True) or request.form
+    name = (data.get("name") or "").strip() or None
+    start = _parse_competition_time(data.get("start_time"))
+    end = _parse_competition_time(data.get("end_time"))
+
+    if start is None or end is None:
+        return jsonify({"status": "error", "message": "Valid start_time and end_time are required"}), 400
+    if end <= start:
+        return jsonify({"status": "error", "message": "end_time must be after start_time"}), 400
+
+    window = CompetitionWindow(name=name, start_time=start, end_time=end, enabled=True)
+    db.session.add(window)
+    db.session.commit()
+
+    _refresh_after_window_change()
+    return jsonify({"status": "success", "window": window.to_dict()})
+
+
+@mod.route("/api/admin/windows/<int:window_id>", methods=["PATCH"])
+@login_required
+def admin_toggle_window(window_id):
+    """Enable/disable a window without deleting it (park a cancelled day)."""
+    if not current_user.is_white_team:
+        return jsonify({"status": "Unauthorized"}), 403
+    window = db.session.get(CompetitionWindow, window_id)
+    if window is None:
+        return jsonify({"status": "error", "message": "Not found"}), 404
+
+    data = request.get_json(silent=True) or request.form
+    if "enabled" in data:
+        raw = data.get("enabled")
+        window.enabled = raw is True or str(raw).lower() in ("true", "1", "on", "yes")
+    else:
+        window.enabled = not window.enabled
+    db.session.add(window)
+    db.session.commit()
+
+    _refresh_after_window_change()
+    return jsonify({"status": "success", "window": window.to_dict()})
+
+
+@mod.route("/api/admin/windows/<int:window_id>", methods=["DELETE"])
+@login_required
+def admin_delete_window(window_id):
+    """Delete a competition window."""
+    if not current_user.is_white_team:
+        return jsonify({"status": "Unauthorized"}), 403
+    window = db.session.get(CompetitionWindow, window_id)
+    if window is None:
+        return jsonify({"status": "error", "message": "Not found"}), 404
+    db.session.delete(window)
+    db.session.commit()
+    _refresh_after_window_change()
+    return jsonify({"status": "success"})

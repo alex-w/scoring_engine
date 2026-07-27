@@ -61,6 +61,103 @@
   });
   </script>
 
+  <!-- Competition Schedule (multi-day windows) -->
+  <h3 class="section-header">Competition Schedule</h3>
+  <div class="chart-card">
+    <p class="text-muted">
+      Define the windows during which the engine scores (competition timezone).
+      Outside every window the engine idles &mdash; no wasted checks between
+      competition days &mdash; and the public scoreboard freezes to the end of the
+      last completed window, while the white team keeps seeing live scores. With no
+      windows defined the engine runs continuously and only the manual freeze above
+      applies.
+    </p>
+    <div id="windows-list" class="mb-3"></div>
+    <form id="window-form" role="form" class="row g-2 align-items-end">
+      <div class="col-auto">
+        <label class="form-label">Label (optional)</label>
+        <input type="text" class="form-control" id="window-name" placeholder="Day 1">
+      </div>
+      <div class="col-auto">
+        <label class="form-label">Start (competition local time)</label>
+        <input type="datetime-local" step="1" class="form-control" id="window-start">
+      </div>
+      <div class="col-auto">
+        <label class="form-label">End (competition local time)</label>
+        <input type="datetime-local" step="1" class="form-control" id="window-end">
+      </div>
+      <div class="col-auto">
+        <button type="submit" class="btn btn-primary">Add Window</button>
+      </div>
+      <div class="col-12"><div id="window-msg" class="small mt-1"></div></div>
+    </form>
+  </div>
+  <script>
+  $(function () {
+    function renderWindows(windows) {
+      if (!windows || !windows.length) {
+        $('#windows-list').html('<span class="badge bg-secondary">No schedule</span> ' +
+          '<span class="text-muted small">Engine runs continuously.</span>');
+        return;
+      }
+      var rows = windows.map(function (w) {
+        var label = w.name ? ScoringEngineUtils.escapeHtml(w.name) + ': ' : '';
+        var badge = w.enabled ? '<span class="badge bg-success">enabled</span>'
+                              : '<span class="badge bg-secondary">disabled</span>';
+        return '<tr data-id="' + w.id + '">' +
+          '<td>' + label + ScoringEngineUtils.escapeHtml(w.start_display) + ' &rarr; ' +
+            ScoringEngineUtils.escapeHtml(w.end_display) + '</td>' +
+          '<td>' + badge + '</td>' +
+          '<td class="text-end">' +
+            '<button type="button" class="btn btn-sm btn-outline-secondary window-toggle">' +
+              (w.enabled ? 'Disable' : 'Enable') + '</button> ' +
+            '<button type="button" class="btn btn-sm btn-outline-danger window-delete">Delete</button>' +
+          '</td></tr>';
+      }).join('');
+      $('#windows-list').html('<table class="table table-sm align-middle mb-0"><tbody>' + rows + '</tbody></table>');
+    }
+    function loadWindows() {
+      $.getJSON('/api/admin/windows', function (d) { renderWindows(d.windows); });
+    }
+    function showMsg(text, ok) {
+      $('#window-msg').removeClass('text-danger text-success')
+        .addClass(ok ? 'text-success' : 'text-danger').text(text);
+    }
+    $('#window-form').on('submit', function (e) {
+      e.preventDefault();
+      $('#window-msg').text('');
+      $.ajax({
+        url: '/api/admin/windows', method: 'POST', contentType: 'application/json',
+        data: JSON.stringify({
+          name: $('#window-name').val(),
+          start_time: $('#window-start').val(),
+          end_time: $('#window-end').val()
+        }),
+        success: function () {
+          showMsg('Window added.', true);
+          $('#window-name,#window-start,#window-end').val('');
+          loadWindows();
+        },
+        error: function (xhr) {
+          var m = 'Error'; try { m = xhr.responseJSON.message || m; } catch (e) {}
+          showMsg(m, false);
+        }
+      });
+    });
+    $('#windows-list').on('click', '.window-delete', function () {
+      var id = $(this).closest('tr').data('id');
+      $.ajax({ url: '/api/admin/windows/' + id, method: 'DELETE',
+        success: loadWindows, error: function () { showMsg('Delete failed.', false); } });
+    });
+    $('#windows-list').on('click', '.window-toggle', function () {
+      var id = $(this).closest('tr').data('id');
+      $.ajax({ url: '/api/admin/windows/' + id, method: 'PATCH',
+        success: loadWindows, error: function () { showMsg('Update failed.', false); } });
+    });
+    loadWindows();
+  });
+  </script>
+
   <!-- SLA Penalties Section -->
   <h3 class="section-header">SLA Penalty Configuration</h3>
   <div class="chart-card">

@@ -1,5 +1,6 @@
 from scoring_engine.models.account import Account
 from scoring_engine.models.check import Check
+from scoring_engine.models.competition_window import CompetitionWindow
 from scoring_engine.models.environment import Environment
 from scoring_engine.models.announcement import Announcement
 from scoring_engine.models.inject import Inject, InjectComment, InjectFile, InjectRubricScore, RubricItem, Template

@@ -25,11 +25,19 @@ from scoring_engine.models.service import Service
 
 
 def get_freeze_time():
-    """Return the scoreboard freeze time as a naive-UTC datetime, or None.
+    """Return the effective scoreboard freeze time as a naive-UTC datetime, or None.
 
-    Stored in the ``scoreboard_freeze_time`` setting as an ISO string (empty when
-    not frozen). Normalized to naive UTC to compare against the naive-UTC datetimes
-    the app stores (round_end, graded, created_at).
+    Two sources, in precedence order:
+
+    1. The manual ``scoreboard_freeze_time`` setting (an ISO string; empty when
+       not set). This is the operator's explicit last-hour freeze and wins when
+       present -- it freezes the display while the engine keeps scoring.
+    2. Otherwise the schedule-derived freeze: between competition windows the
+       board shows the last completed window's standings (see
+       :func:`scoring_engine.schedule.window_derived_freeze`).
+
+    Normalized to naive UTC to compare against the naive-UTC datetimes the app
+    stores (round_end, graded, created_at).
     """
     import pytz
     from dateutil.parser import parse
@@ -38,15 +46,20 @@ def get_freeze_time():
 
     setting = Setting.get_setting("scoreboard_freeze_time")
     value = setting.value if setting else None
-    if not value:
-        return None
-    try:
-        dt = parse(str(value))
-    except (ValueError, TypeError, OverflowError):
-        return None
-    if dt.tzinfo is not None:
-        dt = dt.astimezone(pytz.utc).replace(tzinfo=None)
-    return dt
+    if value:
+        try:
+            dt = parse(str(value))
+        except (ValueError, TypeError, OverflowError):
+            dt = None
+        if dt is not None:
+            if dt.tzinfo is not None:
+                dt = dt.astimezone(pytz.utc).replace(tzinfo=None)
+            return dt
+
+    # No explicit freeze -- fall back to the competition schedule.
+    from scoring_engine.schedule import window_derived_freeze
+
+    return window_derived_freeze()
 
 
 def _round_freeze_filter(query, freeze_time):

@@ -31,6 +31,7 @@ from scoring_engine.models.round_score import RoundScore
 from scoring_engine.models.property import Property
 from scoring_engine.models.service import Service
 from scoring_engine.models.setting import Setting
+from scoring_engine.schedule import engine_should_run
 
 
 def _utcnow():
@@ -462,6 +463,18 @@ class Engine(object):
             if Setting.get_setting("engine_paused").value:
                 pause_duration = int(Setting.get_setting("pause_duration").value)
                 logger.info("Engine Paused. Sleeping for {0} seconds".format(pause_duration))
+                self.sleep(pause_duration)
+                continue
+
+            # Competition schedule: outside every configured window the engine
+            # idles rather than probing hosts that are powered down between
+            # competition days. This gates only the *next* round, so any in-flight
+            # round finishes and materializes first; the loop re-checks each cycle,
+            # so the engine resumes on its own when the next window opens. No
+            # windows configured means no schedule -- the engine always runs.
+            if not engine_should_run(_utcnow(), session=self.db.session):
+                pause_duration = int(Setting.get_setting("pause_duration").value)
+                logger.info("Outside competition window. Sleeping for {0} seconds".format(pause_duration))
                 self.sleep(pause_duration)
                 continue
 

@@ -48,6 +48,36 @@ class TestGetFreezeTime:
         assert get_freeze_time() is None
 
 
+class TestGetFreezeTimeSchedule:
+    """get_freeze_time composes the manual freeze with the competition schedule."""
+
+    def _past_window(self):
+        # A window entirely in the past, so "now" is always after it and it
+        # deterministically implies a freeze at its close.
+        from scoring_engine.models.competition_window import CompetitionWindow
+
+        end = datetime(2020, 1, 1, 17, 0, 0)
+        db.session.add(
+            CompetitionWindow(name="past", start_time=datetime(2020, 1, 1, 9, 0, 0), end_time=end, enabled=True)
+        )
+        db.session.commit()
+        return end
+
+    def test_manual_freeze_overrides_schedule(self):
+        self._past_window()
+        _set_freeze("2026-01-01T10:30:00")
+        assert get_freeze_time() == FREEZE
+
+    def test_schedule_derived_when_no_manual_freeze(self):
+        end = self._past_window()
+        _set_freeze("")
+        assert get_freeze_time() == end
+
+    def test_no_manual_no_windows_is_not_frozen(self):
+        _set_freeze("")
+        assert get_freeze_time() is None
+
+
 class TestServiceScoreFreeze:
     def test_only_rounds_closed_before_freeze_count(self):
         team = make_team(color="Blue")
