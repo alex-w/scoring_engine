@@ -75,6 +75,10 @@ def _insert_default_settings():
         ("flag_points_user", "100"),
         ("flag_points_root", "200"),
         ("scoreboard_freeze_time", ""),
+        ("weighted_scoring_enabled", False),
+        ("service_weight", "1.0"),
+        ("inject_weight", "1.0"),
+        ("flag_weight", "1.0"),
     ]
     for name, value in settings:
         db.session.add(Setting(name=name, value=value))

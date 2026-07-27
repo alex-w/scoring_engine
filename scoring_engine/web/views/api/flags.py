@@ -243,6 +243,7 @@ def api_flags_score():
         return jsonify({"status": "Unauthorized"}), 403
 
     from scoring_engine.scores import flag_points_by_team, get_flag_point_values
+    from scoring_engine.sla import get_sla_config
 
     from . import get_effective_freeze
 
@@ -253,8 +254,16 @@ def api_flags_score():
     blue_teams = db.session.query(Team).filter(Team.color == "Blue").order_by(Team.id).all()
     by_team = [{"team": team.name, "points": by_team_id.get(team.id, 0)} for team in blue_teams]
 
+    # Weighted scoring can scale the red team's flag total. Flags accrue to red
+    # only, so unlike the blue scoreboard there is nothing to rebalance flags
+    # against -- flag_weight simply scales the red flag magnitude.
+    red_total = sum(by_team_id.values())
+    sla_config = get_sla_config()
+    if sla_config.weighted_scoring_enabled:
+        red_total = int(round(red_total * sla_config.flag_weight))
+
     return jsonify(
-        red_total=sum(by_team_id.values()),
+        red_total=red_total,
         by_team=by_team,
         points={"user": user_points, "root": root_points},
     )

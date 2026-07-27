@@ -1942,3 +1942,75 @@ def admin_delete_window(window_id):
     db.session.commit()
     _refresh_after_window_change()
     return jsonify({"status": "success"})
+
+
+def _upsert_setting(name, value):
+    """Set a setting, creating the row if a pre-feature DB never seeded it."""
+    setting = Setting.get_setting(name)
+    if setting is None:
+        setting = Setting(name=name, value=value)
+    else:
+        setting.value = value
+    db.session.add(setting)
+    db.session.commit()
+    Setting.clear_cache(name)
+
+
+@mod.route("/api/admin/weighted_scoring", methods=["GET"])
+@login_required
+def admin_get_weighted_scoring():
+    """Return the current weighted-scoring configuration (white team only)."""
+    if not current_user.is_white_team:
+        return jsonify({"status": "Unauthorized"}), 403
+
+    def _float(name, default):
+        setting = Setting.get_setting(name)
+        try:
+            return float(setting.value) if setting else default
+        except (ValueError, TypeError):
+            return default
+
+    enabled = Setting.get_setting("weighted_scoring_enabled")
+    return jsonify(
+        enabled=bool(enabled.value) if enabled else False,
+        service_weight=_float("service_weight", 1.0),
+        inject_weight=_float("inject_weight", 1.0),
+        flag_weight=_float("flag_weight", 1.0),
+    )
+
+
+@mod.route("/api/admin/weighted_scoring", methods=["POST"])
+@login_required
+def admin_set_weighted_scoring():
+    """Set weighted-scoring configuration (white team only).
+
+    Accepts ``enabled`` (bool) and ``service_weight`` / ``inject_weight`` /
+    ``flag_weight`` (numbers >= 0). Absent fields are left unchanged; a present
+    weight that is negative or unparseable is rejected.
+    """
+    if not current_user.is_white_team:
+        return jsonify({"status": "Unauthorized"}), 403
+
+    data = request.get_json(silent=True) or request.form
+
+    if "enabled" in data:
+        raw = data.get("enabled")
+        _upsert_setting("weighted_scoring_enabled", raw is True or str(raw).lower() in ("true", "1", "on", "yes"))
+
+    for name in ("service_weight", "inject_weight", "flag_weight"):
+        if name in data:
+            try:
+                weight = float(data[name])
+            except (ValueError, TypeError):
+                return jsonify({"status": "error", "message": f"{name} must be a number"}), 400
+            if weight < 0:
+                return jsonify({"status": "error", "message": f"{name} must be >= 0"}), 400
+            _upsert_setting(name, str(weight))
+
+    # Weights change every team's combined total and the red flag total.
+    update_scoreboard_data()
+    update_overview_data()
+    update_flags_data()
+    publish_event("settings_changed", {"setting": "weighted_scoring"})
+
+    return jsonify({"status": "success"})

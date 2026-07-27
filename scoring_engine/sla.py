@@ -38,6 +38,13 @@ class SLAConfig:
         self.late_start_round = self._get_int_setting("dynamic_scoring_late_start_round", 50)
         self.late_multiplier = self._get_float_setting("dynamic_scoring_late_multiplier", 0.5)
 
+        # Weighted scoring settings: multipliers that rebalance the service,
+        # inject, and flag contributions to the combined scoreboard total.
+        self.weighted_scoring_enabled = self._get_bool_setting("weighted_scoring_enabled", False)
+        self.service_weight = self._get_float_setting("service_weight", 1.0)
+        self.inject_weight = self._get_float_setting("inject_weight", 1.0)
+        self.flag_weight = self._get_float_setting("flag_weight", 1.0)
+
     def _get_setting(self, name, default):
         """Get a setting value from the database."""
         setting = Setting.get_setting(name)

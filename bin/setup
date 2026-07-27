@@ -220,6 +220,12 @@ with app.app_context():
     db.session.add(Setting(name="flag_points_user", value=str(config.flag_points_user)))
     db.session.add(Setting(name="flag_points_root", value=str(config.flag_points_root)))
 
+    # Weighted scoring (rebalance service/inject/flag contributions to the total)
+    db.session.add(Setting(name="weighted_scoring_enabled", value=config.weighted_scoring_enabled))
+    db.session.add(Setting(name="service_weight", value=str(config.service_weight)))
+    db.session.add(Setting(name="inject_weight", value=str(config.inject_weight)))
+    db.session.add(Setting(name="flag_weight", value=str(config.flag_weight)))
+
     # Wall-clock scoreboard freeze (empty = not frozen; set at runtime by white team)
     db.session.add(Setting(name="scoreboard_freeze_time", value=""))
 

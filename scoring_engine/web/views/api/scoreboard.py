@@ -90,8 +90,20 @@ def _get_bar_data_cached(anonymize, show_both, frozen_view=False):
     team_sla_penalties = []
     team_adjustments = []
     team_adjusted_scores = []
+    # Pre-weight values, kept alongside the weighted ones so the UI can show the
+    # breakdown (e.g. "120 service x 1.5"). Equal to the weighted values when
+    # weighted scoring is off.
+    team_raw_service_scores = []
+    team_raw_inject_scores = []
 
     team_colors = []
+
+    # Weighted scoring rebalances the categories that make up the combined total:
+    # service and inject are scaled by their weights before they are summed with
+    # manual adjustments. Adjustments are absolute point awards and are never
+    # weighted. Flag captures accrue to the red team only (see the flags API),
+    # so flag_weight does not enter the blue teams' totals here.
+    weighted = sla_config.weighted_scoring_enabled
 
     blue_teams = db.session.query(Team).filter(Team.color == "Blue").order_by(Team.id).all()
     team_name_map = Team.get_team_name_mapping(anonymize=anonymize, show_both=show_both)
@@ -103,13 +115,22 @@ def _get_bar_data_cached(anonymize, show_both, frozen_view=False):
         service_score = current_scores.get(blue_team.id, 0)
         inject_score = inject_scores.get(blue_team.id, 0)
         adjustment = adjustments.get(blue_team.id, 0)
-        team_scores.append(str(service_score))
-        team_inject_scores.append(str(inject_score))
+
+        team_raw_service_scores.append(str(service_score))
+        team_raw_inject_scores.append(str(inject_score))
+        if weighted:
+            weighted_service = int(round(service_score * sla_config.service_weight))
+            weighted_inject = int(round(inject_score * sla_config.inject_weight))
+        else:
+            weighted_service = service_score
+            weighted_inject = inject_score
+        team_scores.append(str(weighted_service))
+        team_inject_scores.append(str(weighted_inject))
         team_adjustments.append(str(adjustment))
 
         # Calculate SLA penalties if enabled
-        # Total base score includes service, inject, and manual adjustments
-        total_base_score = service_score + inject_score + adjustment
+        # Total base score includes (weighted) service, inject, and manual adjustments
+        total_base_score = weighted_service + weighted_inject + adjustment
         if sla_config.sla_enabled:
             penalty = calculate_team_total_penalties(blue_team, sla_config)
             team_sla_penalties.append(str(penalty))
@@ -130,6 +151,15 @@ def _get_bar_data_cached(anonymize, show_both, frozen_view=False):
     team_data["adjustments"] = team_adjustments
     team_data["adjusted_scores"] = team_adjusted_scores
     team_data["sla_enabled"] = sla_config.sla_enabled
+    team_data["weighted_scoring_enabled"] = weighted
+    if weighted:
+        team_data["weights"] = {
+            "service": sla_config.service_weight,
+            "inject": sla_config.inject_weight,
+            "flag": sla_config.flag_weight,
+        }
+        team_data["raw_service_scores"] = team_raw_service_scores
+        team_data["raw_inject_scores"] = team_raw_inject_scores
     return team_data
 
 
