@@ -1,0 +1,215 @@
+#!/usr/bin/env python
+"""Generate a large synthetic dataset for performance/scale testing.
+
+Bulk-loads blue teams, services, rounds, materialized ``round_score`` rows, and
+(optionally) a recent window of ``checks`` so the read paths can be exercised at
+competition scale -- e.g. the scoreboard, overview, SLA penalties, and dynamic /
+weighted scoring under load.
+
+This is a developer/benchmarking tool, NOT part of setup: it wipes the
+perf-relevant tables (checks, round_score, services, rounds, flag_solves,
+score_adjustment) and every Blue team, then regenerates them. White/Red teams,
+users, and settings are left intact so you can still log in. Point it at a
+throwaway database.
+
+Examples
+--------
+    # 100 teams x 100 services x 3000 rounds, checks for the last 300 rounds
+    python bin/generate-perf-data --teams 100 --services 100 --rounds 3000 --check-rounds 300
+
+    # ...and turn on the heaviest scoring configuration + one adjustment per team
+    python bin/generate-perf-data --teams 100 --services 100 --rounds 3000 --complex-config
+
+Notes
+-----
+- ``round_score`` is written directly (one row per team per round) rather than by
+  running the engine, so this is fast and independent of check generation.
+- ``checks`` are only generated for the most recent ``--check-rounds`` rounds,
+  because that is what the SLA path (consecutive-failure scan) and the overview
+  up/down counts actually read. Full history would be teams*services*rounds rows.
+"""
+
+import argparse
+import random
+import time
+from datetime import datetime, timezone
+
+from scoring_engine.web import create_app
+
+BATCH = 50000
+WIPE_TABLES = ("checks", "round_score", "services", "rounds", "flag_solves", "score_adjustment")
+
+
+def _naive_utcnow():
+    return datetime.now(timezone.utc).replace(tzinfo=None)
+
+
+def generate(teams, services_per_team, rounds, check_rounds, complex_config):
+    from sqlalchemy import text
+
+    from scoring_engine.db import db
+    from scoring_engine.models.check import Check
+    from scoring_engine.models.round import Round
+    from scoring_engine.models.round_score import RoundScore
+    from scoring_engine.models.service import Service
+    from scoring_engine.models.team import Team
+
+    s = db.session
+    t0 = time.time()
+
+    # Wipe perf tables + blue teams (FK checks off so order/references don't
+    # matter). TRUNCATE, not DELETE: at perf scale these tables hold millions of
+    # rows and a row-by-row DELETE would dominate the runtime. Blue teams still
+    # use DELETE because it is a filtered removal, not a whole-table reset.
+    s.execute(text("SET FOREIGN_KEY_CHECKS=0"))
+    for tbl in WIPE_TABLES:
+        s.execute(text(f"TRUNCATE TABLE {tbl}"))
+    s.execute(text("DELETE FROM teams WHERE color='Blue'"))
+    s.execute(text("SET FOREIGN_KEY_CHECKS=1"))
+    s.commit()
+
+    s.bulk_insert_mappings(Team, [{"name": f"Team{i}", "color": "Blue"} for i in range(1, teams + 1)])
+    s.commit()
+    blue_ids = [row[0] for row in s.query(Team.id).filter(Team.color == "Blue").all()]
+
+    svc = [
+        {
+            "name": f"svc{k}",
+            "check_name": "ICMPCheck",
+            "team_id": tid,
+            "points": 100,
+            "host": "127.0.0.1",
+            "port": 1 + k,
+            "worker_queue": "main",
+        }
+        for tid in blue_ids
+        for k in range(services_per_team)
+    ]
+    s.bulk_insert_mappings(Service, svc)
+    s.commit()
+    svc_by_team = {}
+    for sid, tid in s.query(Service.id, Service.team_id).all():
+        svc_by_team.setdefault(tid, []).append(sid)
+
+    now = _naive_utcnow()
+    s.bulk_insert_mappings(Round, [{"number": n, "round_start": now, "round_end": now} for n in range(1, rounds + 1)])
+    s.commit()
+    round_rows = s.query(Round.id, Round.number).order_by(Round.number).all()
+
+    rs = []
+    for rid, rnum in round_rows:
+        for tid in blue_ids:
+            rs.append(
+                {
+                    "round_id": rid,
+                    "round_number": rnum,
+                    "team_id": tid,
+                    "service_points": random.randint(0, services_per_team * 100),
+                    "flag_points": 0,
+                }
+            )
+        if len(rs) >= BATCH:
+            s.bulk_insert_mappings(RoundScore, rs)
+            s.commit()
+            rs = []
+    if rs:
+        s.bulk_insert_mappings(RoundScore, rs)
+        s.commit()
+
+    n_checks = 0
+    check_rids = [rid for rid, rnum in round_rows if rnum > rounds - check_rounds]
+    ck = []
+    for rid in check_rids:
+        for tid in blue_ids:
+            for sid in svc_by_team[tid]:
+                ck.append(
+                    {
+                        "round_id": rid,
+                        "service_id": sid,
+                        "result": random.random() < 0.7,
+                        "completed": True,
+                        "output": "",
+                        "reason": "",
+                        "command": "",
+                    }
+                )
+        if len(ck) >= BATCH:
+            s.bulk_insert_mappings(Check, ck)
+            s.commit()
+            n_checks += len(ck)
+            ck = []
+    if ck:
+        s.bulk_insert_mappings(Check, ck)
+        s.commit()
+        n_checks += len(ck)
+
+    if complex_config:
+        _apply_complex_config(blue_ids)
+
+    _flush_caches()
+
+    print(f"DONE in {round(time.time() - t0, 1)}s")
+    print(
+        f"  teams={len(blue_ids)} services={len(svc)} rounds={rounds} "
+        f"round_score={rounds * len(blue_ids)} checks={n_checks} "
+        f"(checks for last {check_rounds} rounds)"
+    )
+    if complex_config:
+        print("  complex config ON: weighted + dynamic + SLA + injects, one adjustment/team")
+
+
+def _apply_complex_config(blue_ids):
+    from scoring_engine.db import db
+    from scoring_engine.models.score_adjustment import ScoreAdjustment
+    from scoring_engine.models.setting import Setting
+
+    def setv(name, value):
+        setting = Setting.get_setting(name)
+        setting.value = value
+        db.session.add(setting)
+
+    setv("weighted_scoring_enabled", True)
+    setv("service_weight", "1.5")
+    setv("inject_weight", "2.0")
+    setv("flag_weight", "1.0")
+    setv("dynamic_scoring_enabled", True)
+    setv("sla_enabled", True)
+    setv("inject_scores_visible", True)
+    db.session.commit()
+    for tid in blue_ids:
+        db.session.add(ScoreAdjustment(team_id=tid, points=250, reason="perf"))
+    db.session.commit()
+    Setting.clear_cache()
+
+
+def _flush_caches():
+    from scoring_engine.cache_helper import update_all_cache
+
+    update_all_cache()
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("--teams", type=int, default=100, help="number of blue teams (default 100)")
+    parser.add_argument("--services", type=int, default=100, help="services per team (default 100)")
+    parser.add_argument("--rounds", type=int, default=3000, help="number of rounds / round_score rows per team")
+    parser.add_argument(
+        "--check-rounds",
+        type=int,
+        default=300,
+        help="generate checks for the most recent N rounds (default 300; 0 = none)",
+    )
+    parser.add_argument(
+        "--complex-config",
+        action="store_true",
+        help="also enable weighted+dynamic+SLA+inject scoring and add one adjustment per team",
+    )
+    args = parser.parse_args()
+
+    app = create_app()
+    with app.app_context():
+        generate(args.teams, args.services, args.rounds, min(args.check_rounds, args.rounds), args.complex_config)
+
+
+if __name__ == "__main__":
+    main()
