@@ -249,14 +249,15 @@ class TestScoreboardAPI:
         assert team1_data is not None
         assert team2_data is not None
 
-        # Scores are cumulative over rounds with passing checks
-        # Blue Team: passed round 1 (100) and round 2 (100)
-        # Cumulative: [0, 100, 200]
-        assert team1_data["scores"] == [0, 100, 200]
+        # Scores are cumulative per round; a round with no points carries the
+        # previous total forward so the series aligns to the rounds axis.
+        # Blue Team: pass r1 (100), pass r2 (100), fail r3 (carry 200)
+        # Cumulative by round 0,1,2,3: [0, 100, 200, 200]
+        assert team1_data["scores"] == [0, 100, 200, 200]
 
-        # Blue Team 2: passed round 1 (50) and round 3 (50)
-        # Cumulative: [0, 50, 100]
-        assert team2_data["scores"] == [0, 50, 100]
+        # Blue Team 2: pass r1 (50), fail r2 (carry 50), pass r3 (100)
+        # Cumulative by round 0,1,2,3: [0, 50, 50, 100]
+        assert team2_data["scores"] == [0, 50, 50, 100]
 
         assert "color" in team1_data
         assert "color" in team2_data
@@ -277,6 +278,32 @@ class TestScoreboardAPI:
         team_data = data["team"][0]
         # Cumulative: [0, 200, 400]
         assert team_data["scores"] == [0, 200, 400]
+
+    def test_get_line_data_downsamples_when_over_cap(self, monkeypatch):
+        """A long competition is downsampled to a bounded number of x-points,
+        keeping the endpoints and the final cumulative total, with every team's
+        series aligned to the (downsampled) rounds axis."""
+        import scoring_engine.web.views.api.scoreboard as sb
+
+        monkeypatch.setattr(sb, "LINE_CHART_MAX_POINTS", 5)
+
+        svc = Service(name="SSH", check_name="SSHCheck", host="10.0.0.1", team=self.blue_team, points=10)
+        db.session.add(svc)
+        db.session.commit()
+        for r in range(1, 13):  # 12 rounds -> 13 x-points (0..12), over the cap of 5
+            self._create_round_with_checks(r, [svc], [True])
+
+        resp = self.client.get("/api/scoreboard/get_line_data")
+        assert resp.status_code == 200
+        data = resp.json
+
+        assert len(data["rounds"]) <= 5
+        assert data["rounds"][0] == "Round 0"
+        assert data["rounds"][-1] == "Round 12"
+        for t in data["team"]:
+            assert len(t["scores"]) == len(data["rounds"])  # aligned
+        team = next(t for t in data["team"] if t["name"] == "Blue Team")
+        assert team["scores"][-1] == 120  # 12 rounds * 10, full total preserved
 
     # -----------------------------------------------------------------------
     # Anonymize mode tests
@@ -360,3 +387,30 @@ class TestScoreboardAPI:
         data = resp.json
         assert "Blue Team" in data["labels"]
         assert "Blue Team 2" in data["labels"]
+
+
+class TestDownsampleIndices:
+    """Unit tests for the line-chart x-axis downsampler."""
+
+    def _fn(self):
+        from scoring_engine.web.views.api.scoreboard import _downsample_indices
+
+        return _downsample_indices
+
+    def test_returns_all_when_at_or_under_cap(self):
+        f = self._fn()
+        assert f(5, 10) == [0, 1, 2, 3, 4]
+        assert f(10, 10) == list(range(10))
+
+    def test_caps_and_keeps_endpoints(self):
+        f = self._fn()
+        idx = f(100, 10)
+        assert len(idx) <= 10
+        assert idx[0] == 0
+        assert idx[-1] == 99  # last index always included
+        assert idx == sorted(idx)
+        assert len(set(idx)) == len(idx)  # unique
+
+    def test_evenly_spaced(self):
+        f = self._fn()
+        assert f(11, 6) == [0, 2, 4, 6, 8, 10]

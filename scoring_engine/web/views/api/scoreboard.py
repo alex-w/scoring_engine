@@ -1,6 +1,5 @@
 from collections import defaultdict
 from datetime import datetime, timezone
-from itertools import accumulate
 
 from flask import jsonify
 from flask_login import current_user
@@ -166,6 +165,30 @@ def _get_bar_data_cached(anonymize, show_both, frozen_view=False):
     return team_data
 
 
+# Cap on the number of x-points in a line series. One point per round makes the
+# response grow without bound (~2.4 MB at 100 teams x 3000 rounds); this keeps it
+# flat regardless of competition length. A few hundred points is well past what a
+# line chart can resolve on screen.
+LINE_CHART_MAX_POINTS = 400
+
+
+def _downsample_indices(n, max_points):
+    """Evenly-spaced indices into ``range(n)``, at most ``max_points``, always
+    including the first and last. Returns every index when ``n <= max_points``.
+
+    Uniform sampling is enough here because the cumulative score series is smooth
+    and monotonic; it also gives every team the same x-points, which a shared
+    rounds axis requires.
+    """
+    if n <= max_points:
+        return list(range(n))
+    step = (n - 1) / (max_points - 1)
+    indices = sorted({round(i * step) for i in range(max_points)})
+    if indices[-1] != n - 1:
+        indices.append(n - 1)
+    return indices
+
+
 @cache.memoize()
 def _get_line_data_cached(anonymize, show_both, frozen_view=False):
     """
@@ -179,18 +202,6 @@ def _get_line_data_cached(anonymize, show_both, frozen_view=False):
 
     last_round = Round.get_last_round_num()
     sla_config = get_sla_config()
-
-    # TODO(perf): downsample the line series. This returns one point per team per
-    # round, so the payload grows without bound as a competition runs -- measured
-    # ~2.4 MB at 100 teams x 3000 rounds. The query itself is cheap (indexed
-    # round_score); the cost is JSON size / transfer. Cap each series to ~N points
-    # (e.g. bucket rounds, or LTTB downsampling that preserves the visual shape)
-    # so the response stays flat regardless of round count. Keep the full series
-    # available to the white team / an export path if the fine grain is needed.
-    team_data = {
-        "team": [],
-        "rounds": [f"Round {round}" for round in range(last_round + 1)],
-    }
 
     blue_teams = (
         db.session.query(Team.id, Team.name, Team.rgb_color).filter(Team.color == "Blue").order_by(Team.id).all()
@@ -210,14 +221,34 @@ def _get_line_data_cached(anonymize, show_both, frozen_view=False):
         # Apply dynamic scoring multiplier if enabled
         scores_dict[team_id][round_number] = apply_dynamic_scoring_to_round(round_number, round_score, sla_config)
 
+    # x-axis is every round (0..last_round), downsampled to a bounded set of
+    # points shared by all teams.
+    n = last_round + 1
+    sampled = _downsample_indices(n, LINE_CHART_MAX_POINTS)
+
+    team_data = {
+        "team": [],
+        "rounds": [f"Round {i}" for i in sampled],
+    }
+
     team_name_map = Team.get_team_name_mapping(anonymize=anonymize, show_both=show_both)
 
     for team_id, team_name, rgb_color in blue_teams:
         display_name = team_name_map.get(team_id, team_name)
+        team_rounds = scores_dict[team_id]
+        # Cumulative score at each round. A round the team did not score in carries
+        # the previous total forward, so the series stays aligned to the rounds
+        # axis (accumulating only the scored rounds would drop points and shift the
+        # line left of where it belongs).
+        cumulative = []
+        running = 0
+        for r in range(n):
+            running += team_rounds.get(r, 0)
+            cumulative.append(running)
         team_data["team"].append(
             {
                 "name": display_name,
-                "scores": list(accumulate(scores_dict[team_id].values(), initial=0)),
+                "scores": [cumulative[i] for i in sampled],
                 "color": rgb_color,
             }
         )
