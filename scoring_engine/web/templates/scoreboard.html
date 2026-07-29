@@ -168,6 +168,8 @@
                     backgroundColor: 'transparent',
                     tooltip: {
                         trigger: 'axis',
+                        confine: true,
+                        appendToBody: true,
                         axisPointer: { type: 'shadow' },
                         formatter: function(params) {
                             var idx = params[0].dataIndex;
@@ -248,7 +250,9 @@
                 teamLineChart.hideLoading();
                 teamLineChart.setOption({
                     backgroundColor: 'transparent',
-                    tooltip: { trigger: 'axis' },
+                    // appendToBody escapes the chart card's overflow:hidden (which
+                    // otherwise clips the tooltip); confine keeps it inside the window.
+                    tooltip: { trigger: 'axis', confine: true, appendToBody: true },
                     grid: {
                         left: '3%',
                         right: '4%',
