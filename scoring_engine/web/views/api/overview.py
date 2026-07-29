@@ -145,7 +145,7 @@ def overview_get_data():
 
     - ``Current Score`` / ``Current Place``: stringified integers
     - ``SLA Penalties``: penalty magnitude as an integer (0 when no penalty)
-    - ``Up/Down Ratio``: ``{"up": <int>, "down": <int>}``
+    - ``Services Up`` / ``Services Down``: this round's up/down counts as integers
     - service rows: check result booleans (or ``None`` when unchecked)
     """
     data = []
@@ -158,7 +158,8 @@ def overview_get_data():
 
     current_scores = ["Current Score"]
     current_places = ["Current Place"]
-    service_ratios = ["Up/Down Ratio"]
+    services_up = ["Services Up"]
+    services_down = ["Services Down"]
     sla_penalties_row = ["SLA Penalties"]
 
     num_up_services = dict(
@@ -228,13 +229,11 @@ def overview_get_data():
             else:
                 current_scores.append(str(team_scores.get(blue_team_id, 0)))
             current_places.append(str(ranks_dict.get(blue_team_id, 0)))
-            # Structured up/down counts - presentation is handled by the front end
-            service_ratios.append(
-                {
-                    "up": num_up_services.get(blue_team_id, 0),
-                    "down": num_down_services.get(blue_team_id, 0),
-                }
-            )
+            # Up and down counts as separate rows so each cell holds a single
+            # value -- a combined "up / down" wraps in a narrow team column and
+            # makes the row height jump around.
+            services_up.append(num_up_services.get(blue_team_id, 0))
+            services_down.append(num_down_services.get(blue_team_id, 0))
             # Penalty magnitude as a number (0 when no penalty); the front end
             # renders it as a negative value
             sla_penalties_row.append(penalties_dict.get(blue_team_id, 0))
@@ -244,7 +243,8 @@ def overview_get_data():
         # Show SLA penalties row when SLA is enabled
         if sla_config.sla_enabled:
             data.append(sla_penalties_row)
-        data.append(service_ratios)
+        data.append(services_up)
+        data.append(services_down)
 
         checks = (
             db.session.query(Service.id, Service.name, Check.result)
