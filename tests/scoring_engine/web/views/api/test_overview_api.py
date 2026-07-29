@@ -71,9 +71,12 @@ class TestOverviewAPI:
             check = Check(service=svc, round=round_obj, result=result, output="", completed=True)
             db.session.add(check)
         db.session.commit()
-        from scoring_engine.scores import materialize_round
+        from scoring_engine.scores import materialize_round, recompute_consecutive_failures_cache
 
         materialize_round(db.session, round_obj.id, round_number)
+        # team_penalties reads the materialized SLA cache; the engine maintains it
+        # in production, so populate it here from the checks these tests built.
+        recompute_consecutive_failures_cache(db.session)
         return round_obj
 
     # --- get_anonymize_mode (via /api/overview/get_columns endpoint) ---

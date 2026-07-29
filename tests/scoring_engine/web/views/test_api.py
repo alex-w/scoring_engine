@@ -13,7 +13,7 @@ from scoring_engine.models.service import Service
 from scoring_engine.models.setting import Setting
 from scoring_engine.models.team import Team
 from scoring_engine.models.user import User
-from scoring_engine.scores import materialize_all_rounds
+from scoring_engine.scores import materialize_all_rounds, recompute_consecutive_failures_cache
 from scoring_engine.web.views.api.service import is_valid_user_input
 
 
@@ -440,6 +440,8 @@ class TestAPI:
         db.session.commit()
 
         materialize_all_rounds(db.session)
+
+        recompute_consecutive_failures_cache(db.session)
         resp = self.client.get("/api/scoreboard/get_bar_data")
         assert resp.status_code == 200
         data = resp.json
@@ -521,6 +523,7 @@ class TestAPI:
             )
             db.session.add_all([check1, check2, check3])
         db.session.commit()
+        recompute_consecutive_failures_cache(db.session)
 
         resp = self.client.get("/api/scoreboard/get_bar_data")
         assert resp.status_code == 200
@@ -751,6 +754,8 @@ class TestAPI:
         db.session.commit()
 
         materialize_all_rounds(db.session)
+
+        recompute_consecutive_failures_cache(db.session)
         resp = self.client.get("/api/scoreboard/get_bar_data")
         assert resp.status_code == 200
         data = resp.json
@@ -799,6 +804,8 @@ class TestAPI:
         db.session.commit()
 
         materialize_all_rounds(db.session)
+
+        recompute_consecutive_failures_cache(db.session)
         resp = self.client.get("/api/scoreboard/get_bar_data")
         assert resp.status_code == 200
         data = resp.json
@@ -839,6 +846,8 @@ class TestAPI:
         db.session.commit()
 
         materialize_all_rounds(db.session)
+
+        recompute_consecutive_failures_cache(db.session)
         resp = self.client.get("/api/scoreboard/get_bar_data")
         assert resp.status_code == 200
         data = resp.json
@@ -884,6 +893,8 @@ class TestAPI:
         db.session.commit()
 
         materialize_all_rounds(db.session)
+
+        recompute_consecutive_failures_cache(db.session)
         resp = self.client.get("/api/overview/get_data")
         assert resp.status_code == 200
         data = resp.json
@@ -1108,6 +1119,8 @@ class TestAPI:
         db.session.commit()
 
         materialize_all_rounds(db.session)
+
+        recompute_consecutive_failures_cache(db.session)
         resp = self.client.get("/api/scoreboard/get_bar_data")
         assert resp.status_code == 200
         data = resp.json
@@ -1186,6 +1199,8 @@ class TestAPI:
         db.session.commit()
 
         materialize_all_rounds(db.session)
+
+        recompute_consecutive_failures_cache(db.session)
         resp = self.client.get("/api/scoreboard/get_bar_data")
         assert resp.status_code == 200
         data = resp.json

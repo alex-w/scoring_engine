@@ -357,6 +357,16 @@ class Engine(object):
                         row.id for row in self.db.session.query(Round.id).filter(Round.number == round_number).all()
                     ]
                     if round_ids:
+                        # Services touched by this round, captured before its checks
+                        # are deleted, so the consecutive-failure cache can be
+                        # repaired from the remaining history once they are gone.
+                        affected_service_ids = [
+                            row[0]
+                            for row in self.db.session.query(Check.service_id)
+                            .filter(Check.round_id.in_(round_ids))
+                            .distinct()
+                            .all()
+                        ]
                         self.db.session.query(Check).filter(Check.round_id.in_(round_ids)).delete(
                             synchronize_session=False
                         )
@@ -367,6 +377,15 @@ class Engine(object):
                             synchronize_session=False
                         )
                         self.db.session.query(Round).filter(Round.id.in_(round_ids)).delete(synchronize_session=False)
+                        # The deleted round's pass/fail no longer applies; rebuild
+                        # the consecutive-failure cache for the services it touched
+                        # from the remaining checks (rare path -- a scan is fine).
+                        if affected_service_ids:
+                            from scoring_engine.scores import recompute_consecutive_failures_cache
+
+                            recompute_consecutive_failures_cache(
+                                self.db.session, service_ids=affected_service_ids, commit=False
+                            )
                     kb_removed = (
                         self.db.session.query(KB)
                         .filter(KB.round_num == round_number, KB.name == "task_ids")
@@ -630,6 +649,11 @@ class Engine(object):
                 # as the checks -- no extra query, and nothing that would autoflush
                 # the pending checks early.
                 round_points = {}
+                # Per-service pass/fail for this round, accumulated in memory so
+                # the consecutive-failure cache can be updated in the same commit
+                # without querying the pending checks (which would autoflush them).
+                round_pass_ids = set()  # services with >=1 passing check this round
+                round_fail_counts = {}  # service id -> count of failing checks this round
                 processed_count = 0
                 for team_name, team_task_ids in task_ids.items():
                     for task_id in team_task_ids:
@@ -698,8 +722,11 @@ class Engine(object):
                             teams[environment.service.team.name]["Success"].append(environment.service.name)
                             team_id = environment.service.team_id
                             round_points[team_id] = round_points.get(team_id, 0) + environment.service.points
+                            round_pass_ids.add(environment.service.id)
                         else:
                             teams[environment.service.team.name]["Failed"].append(environment.service.name)
+                            sid = environment.service.id
+                            round_fail_counts[sid] = round_fail_counts.get(sid, 0) + 1
 
                         check = Check(service=environment.service, round=round_obj)
 
@@ -741,6 +768,17 @@ class Engine(object):
                     clear_existing=False,
                     commit=False,
                 )
+
+                # Fold this round's pass/fail into the materialized consecutive-
+                # failure cache in the SAME commit. no_autoflush keeps the pending
+                # checks from flushing early; the in-memory result sets mean no
+                # checks query runs here. A round that rolls back before the commit
+                # reverts these updates for free (they were never committed).
+                from scoring_engine.scores import apply_consecutive_failures
+
+                with self.db.session.no_autoflush:
+                    apply_consecutive_failures(self.db.session, round_pass_ids, round_fail_counts)
+
                 self.db.session.commit()
                 logger.info("Database commit complete; materialized round scores for %d team(s)", rows_written)
 

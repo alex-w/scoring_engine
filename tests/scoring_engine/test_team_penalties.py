@@ -73,8 +73,14 @@ class TestTeamPenaltiesEquivalence:
     def _assert_equiv(self, **settings):
         for name, value in settings.items():
             _set(name, value)
-        from scoring_engine.scores import team_penalties
+        from scoring_engine.scores import recompute_consecutive_failures_cache, team_penalties
         from scoring_engine.sla import calculate_team_total_penalties, get_sla_config
+
+        # team_penalties reads the materialized cache; populate it from the checks
+        # these tests built directly (the engine would maintain it in production).
+        # The oracle (calculate_team_total_penalties) still scans checks, so the
+        # two remain independent.
+        recompute_consecutive_failures_cache(db.session)
 
         cfg = get_sla_config()
         batched = team_penalties(db.session, cfg)

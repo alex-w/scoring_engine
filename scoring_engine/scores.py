@@ -388,18 +388,92 @@ def _service_base_scores(session, config, points_by_service, service_ids):
     return scores
 
 
+def apply_consecutive_failures(session, pass_service_ids, fail_counts):
+    """Fold one round's results into ``Service.consecutive_failures_cache``.
+
+    Called by the engine at round close from the pass/fail results it already
+    holds in memory -- so it never queries the round's still-pending checks (which
+    would autoflush them ahead of the single atomic round commit). The caller
+    wraps this in ``session.no_autoflush`` and lets the round's own commit persist
+    the updates atomically with the checks and round_score.
+
+    A service that passed at least once this round resets to 0; a service that
+    only failed increments by its number of failing checks this round (the scan
+    counts per check, and round_score already scores multi-environment services
+    per check, so the streak does too).
+    """
+    from collections import defaultdict
+
+    if pass_service_ids:
+        session.query(Service).filter(Service.id.in_(list(pass_service_ids))).update(
+            {Service.consecutive_failures_cache: 0}, synchronize_session=False
+        )
+    # Group fail-only services by their increment so each distinct count is a
+    # single UPDATE (one UPDATE total in the common one-check-per-service case).
+    by_increment = defaultdict(list)
+    for service_id, count in fail_counts.items():
+        if service_id in pass_service_ids:
+            continue  # passed at least once -> already reset to 0
+        by_increment[count].append(service_id)
+    for increment, service_ids in by_increment.items():
+        session.query(Service).filter(Service.id.in_(service_ids)).update(
+            {Service.consecutive_failures_cache: Service.consecutive_failures_cache + increment},
+            synchronize_session=False,
+        )
+
+
+def recompute_consecutive_failures_cache(session, service_ids=None, commit=True):
+    """Recompute ``Service.consecutive_failures_cache`` from the checks table.
+
+    The authoritative slow path, for when the incremental in-memory maintenance
+    does not apply: backfill (migration / example data loaded without the engine)
+    and repair after a round is deleted (engine or admin rollback). Recomputes for
+    all services, or just ``service_ids``.
+    """
+    from collections import defaultdict
+
+    counts = _service_consecutive_failures(session)
+
+    target = session.query(Service.id)
+    if service_ids is not None:
+        target = target.filter(Service.id.in_(list(service_ids)))
+    target_ids = [sid for (sid,) in target.all()]
+    if not target_ids:
+        if commit:
+            session.commit()
+        return
+
+    # Reset the target set, then set the (few) services that have failures --
+    # grouped by value so it is a handful of UPDATEs, not one per service.
+    session.query(Service).filter(Service.id.in_(target_ids)).update(
+        {Service.consecutive_failures_cache: 0}, synchronize_session=False
+    )
+    target_set = set(target_ids)
+    by_value = defaultdict(list)
+    for service_id, failures in counts.items():
+        if failures and service_id in target_set:
+            by_value[failures].append(service_id)
+    for value, sids in by_value.items():
+        session.query(Service).filter(Service.id.in_(sids)).update(
+            {Service.consecutive_failures_cache: value}, synchronize_session=False
+        )
+    if commit:
+        session.commit()
+
+
 def team_penalties(session, config):
     """Return ``{team_id: total_sla_penalty}`` for every team, batched.
 
     Replaces the per-service ``sla.calculate_team_total_penalties`` loop -- which
     issued two check queries for *every* service (~20k queries at 100 teams x 100
-    services) -- with a handful of grouped queries. Produces byte-identical
-    penalties (guarded by an equivalence test); teams with no penalty are absent.
+    services) -- with a read that scans no checks at all for the failure counts:
+    they come from the materialized ``Service.consecutive_failures_cache`` (kept
+    current by the engine at round close). Produces byte-identical penalties
+    (guarded by an equivalence test); teams with no penalty are absent.
 
-    Order matters for cost: consecutive failures are computed for all services
-    first, but the (expensive) earned-score scan is then run only for the services
-    actually over the penalty threshold -- typically a tiny fraction. A service
-    with no penalty never has its base score queried.
+    The (small) earned-score scan then runs only for the services actually over
+    the penalty threshold -- typically a tiny fraction -- so a service with no
+    penalty never has its base score queried.
 
     Deliberately not freeze-aware, matching the existing penalty path (the frozen
     public scoreboard already shows live penalties).
@@ -409,25 +483,28 @@ def team_penalties(session, config):
 
     from scoring_engine.sla import calculate_sla_penalty_percent
 
-    consecutive = _service_consecutive_failures(session)
     percents = {}
-    for service_id, failures in consecutive.items():
-        percent = calculate_sla_penalty_percent(failures, config)
+    points_by_service = {}
+    team_by_service = {}
+    for service_id, team_id, points, failures in session.query(
+        Service.id, Service.team_id, Service.points, Service.consecutive_failures_cache
+    ).all():
+        percent = calculate_sla_penalty_percent(failures or 0, config)
         if percent > 0:
             percents[service_id] = percent
+            points_by_service[service_id] = points
+            team_by_service[service_id] = team_id
     if not percents:
         return {}
 
     penalized_ids = list(percents)
-    points_by_service = dict(session.query(Service.id, Service.points).filter(Service.id.in_(penalized_ids)).all())
     base_scores = _service_base_scores(session, config, points_by_service, penalized_ids)
-    service_team = dict(session.query(Service.id, Service.team_id).filter(Service.id.in_(penalized_ids)).all())
 
     penalties = {}
     for service_id, percent in percents.items():
         penalty = int(base_scores.get(service_id, 0) * (percent / 100))
         if penalty:
-            team_id = service_team.get(service_id)
+            team_id = team_by_service[service_id]
             penalties[team_id] = penalties.get(team_id, 0) + penalty
     return penalties
 

@@ -41,6 +41,13 @@ class Service(Base):
     host = Column(String(256), nullable=False)
     port = Column(Integer, default=0)
     worker_queue = Column(String(50), default="main")
+    # Materialized consecutive-failure count, maintained by the engine at round
+    # close (scores.apply_consecutive_failures). Read by the batched SLA penalty
+    # path (scores.team_penalties) so the scoreboard never scans the whole checks
+    # table. Kept in sync with the ``consecutive_failures`` property, which
+    # recomputes the same value from checks and stays the source of truth for the
+    # single-service paths and the equivalence test.
+    consecutive_failures_cache = Column(Integer, nullable=False, default=0, server_default="0")
 
     def check_result_for_round(self, round_num):
         """

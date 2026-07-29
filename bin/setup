@@ -15,7 +15,7 @@ from scoring_engine.models.inject import Inject, InjectRubricScore, RubricItem, 
 from scoring_engine.models.notifications import Notification
 from scoring_engine.models.round import Round
 from scoring_engine.models.service import Service
-from scoring_engine.scores import materialize_all_rounds
+from scoring_engine.scores import materialize_all_rounds, recompute_consecutive_failures_cache
 from scoring_engine.models.setting import Setting
 from scoring_engine.models.team import Team
 from scoring_engine.models.announcement import Announcement
@@ -287,6 +287,11 @@ with app.app_context():
         # every team even though the checks exist.
         logger.info("Materializing round scores for the simulated rounds")
         materialize_all_rounds(db.session)
+
+        # Same reasoning for the SLA consecutive-failure cache the batched penalty
+        # read uses: the engine would maintain it, but example data skips it.
+        logger.info("Materializing SLA consecutive-failure cache")
+        recompute_consecutive_failures_cache(db.session)
 
         # Simulate Injects
         num_injects = randint(5, 15)
