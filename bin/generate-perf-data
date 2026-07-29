@@ -143,6 +143,12 @@ def generate(teams, services_per_team, rounds, check_rounds, complex_config):
         s.commit()
         n_checks += len(ck)
 
+    # The engine maintains this at round close; loaded statically here, so
+    # populate it from the generated checks (matches what bin/setup does).
+    from scoring_engine.scores import recompute_consecutive_failures_cache
+
+    recompute_consecutive_failures_cache(s)
+
     if complex_config:
         _apply_complex_config(blue_ids)
 
