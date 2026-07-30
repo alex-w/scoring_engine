@@ -72,6 +72,7 @@
 {% else %}
 <body class="bg-body d-flex flex-column min-vh-100{% if current_user.is_authenticated %} {% if current_user.is_white_team %}team-white{% elif current_user.is_blue_team %}team-blue{% elif current_user.is_red_team %}team-red{% endif %}{% endif %}">
 {% endif %}
+    <a href="#main-content" class="visually-hidden-focusable">Skip to main content</a>
     <script>
       // Announcements badge - global scope for child templates
       var _lastBadgeCount = -1;
@@ -167,7 +168,7 @@
     </div>
     {% endfor %}
 
-    <nav class="navbar navbar-expand-md navbar-dark">
+    <nav class="navbar navbar-expand-md navbar-dark" aria-label="Main navigation">
       <div class="container">
         <a class="navbar-brand" href="/"><span class="brand-icon">SE</span> Scoring Engine</a>
         <button class="navbar-toggler" type="button" data-bs-toggle="collapse" data-bs-target="#navbar" aria-controls="navbar" aria-expanded="false" aria-label="Toggle navigation">
@@ -270,7 +271,7 @@
         </div>
         <!--/.container-fluid -->
       </nav>
-      <main class="flex-grow-1">
+      <main id="main-content" tabindex="-1" class="flex-grow-1">
       {% block content %}
       {% endblock %}
       </main>
