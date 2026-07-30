@@ -16,6 +16,7 @@ from sqlalchemy.sql import func
 from scoring_engine.cache_helper import (
     update_all_cache,
     update_all_inject_data,
+    update_flags_data,
     update_inject_comments,
     update_inject_data,
     update_overview_data,
@@ -34,17 +35,21 @@ from scoring_engine.engine.engine import Engine
 from scoring_engine.engine.execute_command import execute_command
 from scoring_engine.events import publish_event
 from scoring_engine.models.check import Check
+from scoring_engine.models.competition_window import CompetitionWindow
 from scoring_engine.models.environment import Environment
 from scoring_engine.models.inject import Inject, InjectComment, InjectRubricScore, RubricItem, Template
 from scoring_engine.models.kb import KB
 from scoring_engine.models.property import Property
 from scoring_engine.models.round import Round
+from scoring_engine.models.round_score import RoundScore
+from scoring_engine.models.score_adjustment import ScoreAdjustment
 from scoring_engine.models.service import Service
 from scoring_engine.models.setting import Setting
 from scoring_engine.models.team import Team
 from scoring_engine.models.user import User
 from scoring_engine.models.welcome import get_welcome_config, save_welcome_config
 from scoring_engine.notifications import notify_inject_graded, notify_revision_requested
+from scoring_engine.schedule import clear_windows_cache
 
 from . import mod
 
@@ -1550,9 +1555,12 @@ def admin_rollback():
         return jsonify({"status": "error", "message": "No rounds exist to rollback"}), 400
 
     if round_number > current_round:
-        return jsonify(
-            {"status": "error", "message": f"round_number ({round_number}) exceeds current round ({current_round})"}
-        ), 400
+        return (
+            jsonify(
+                {"status": "error", "message": f"round_number ({round_number}) exceeds current round ({current_round})"}
+            ),
+            400,
+        )
 
     # Pause the engine to prevent race conditions during rollback
     was_paused = Setting.get_setting("engine_paused").value
@@ -1567,11 +1575,7 @@ def admin_rollback():
 
     try:
         # Revoke any pending Celery tasks for rounds being rolled back
-        task_kb_entries = (
-            db.session.query(KB)
-            .filter(KB.round_num >= round_number, KB.name == "task_ids")
-            .all()
-        )
+        task_kb_entries = db.session.query(KB).filter(KB.round_num >= round_number, KB.name == "task_ids").all()
         revoked_count = 0
         for kb_entry in task_kb_entries:
             try:
@@ -1593,12 +1597,20 @@ def admin_rollback():
         # Count KB entries to delete
         kb_count = db.session.query(KB).filter(KB.round_num >= round_number).count()
 
+        # Count materialized round scores to delete
+        round_scores_count = db.session.query(RoundScore).filter(RoundScore.round_number >= round_number).count()
+
         # Delete checks in batches to avoid lock wait timeout
         BATCH_SIZE = 500
         for i in range(0, len(round_ids), BATCH_SIZE):
             batch_ids = round_ids[i : i + BATCH_SIZE]
             db.session.query(Check).filter(Check.round_id.in_(batch_ids)).delete(synchronize_session=False)
             db.session.commit()
+
+        # Delete materialized round scores. Keyed by round_number, so they must go
+        # with the rounds or the scoreboard keeps ghost points for deleted rounds.
+        db.session.query(RoundScore).filter(RoundScore.round_number >= round_number).delete(synchronize_session=False)
+        db.session.commit()
 
         # Delete KB entries
         db.session.query(KB).filter(KB.round_num >= round_number).delete(synchronize_session=False)
@@ -1632,6 +1644,7 @@ def admin_rollback():
                 "rounds": rounds_count,
                 "checks": checks_count,
                 "kb_entries": kb_count,
+                "round_scores": round_scores_count,
             },
             "new_current_round": Round.get_last_round_num(),
         }
@@ -1668,7 +1681,7 @@ def admin_rollback_preview():
                 "status": "success",
                 "current_round": 0,
                 "round_number": round_number,
-                "will_delete": {"rounds": 0, "checks": 0, "kb_entries": 0},
+                "will_delete": {"rounds": 0, "checks": 0, "kb_entries": 0, "round_scores": 0},
             }
         )
 
@@ -1682,6 +1695,9 @@ def admin_rollback_preview():
     # Count KB entries
     kb_count = db.session.query(KB).filter(KB.round_num >= round_number).count()
 
+    # Count materialized round scores
+    round_scores_count = db.session.query(RoundScore).filter(RoundScore.round_number >= round_number).count()
+
     return jsonify(
         {
             "status": "success",
@@ -1691,6 +1707,310 @@ def admin_rollback_preview():
                 "rounds": len(rounds_to_delete),
                 "checks": checks_count,
                 "kb_entries": kb_count,
+                "round_scores": round_scores_count,
             },
         }
     )
+
+
+@mod.route("/api/admin/adjustments", methods=["GET"])
+@login_required
+def admin_get_adjustments():
+    """List all manual score adjustments (append-only audit log), newest first."""
+    if not current_user.is_white_team:
+        return jsonify({"status": "Unauthorized"}), 403
+
+    rows = (
+        db.session.query(ScoreAdjustment).order_by(ScoreAdjustment.created_at.desc(), ScoreAdjustment.id.desc()).all()
+    )
+    data = [
+        {
+            "id": adj.id,
+            "team": adj.team.name if adj.team else None,
+            "team_id": adj.team_id,
+            "points": adj.points,
+            "reason": adj.reason,
+            "author": adj.author.username if adj.author else None,
+            "created_at": ensure_utc_aware(adj.created_at).isoformat() if adj.created_at else None,
+        }
+        for adj in rows
+    ]
+    return jsonify(data=data)
+
+
+@mod.route("/api/admin/adjustments", methods=["POST"])
+@login_required
+def admin_create_adjustment():
+    """Create a manual score adjustment (bonus or penalty) for a team.
+
+    Append-only: there is no edit or delete. To reverse an adjustment, add a
+    compensating one, so the audit trail stays complete.
+    """
+    if not current_user.is_white_team:
+        return jsonify({"status": "Unauthorized"}), 403
+
+    data = request.get_json(silent=True) or request.form
+    team_id = data.get("team_id")
+    points = data.get("points")
+    reason = (data.get("reason") or "").strip()
+
+    if team_id is None or points is None or not reason:
+        return jsonify({"status": "error", "message": "team_id, points, and reason are required"}), 400
+    try:
+        team_id = int(team_id)
+        points = int(points)
+    except (ValueError, TypeError):
+        return jsonify({"status": "error", "message": "team_id and points must be integers"}), 400
+
+    team = db.session.get(Team, team_id)
+    if team is None:
+        return jsonify({"status": "error", "message": "Team not found"}), 404
+
+    adjustment = ScoreAdjustment(team_id=team_id, points=points, reason=reason, author_id=current_user.id)
+    db.session.add(adjustment)
+    db.session.commit()
+
+    # The team's total changed; refresh the scoreboard caches.
+    update_scoreboard_data()
+
+    return (
+        jsonify(
+            {
+                "status": "success",
+                "id": adjustment.id,
+                "team": team.name,
+                "points": points,
+                "reason": reason,
+            }
+        ),
+        201,
+    )
+
+
+@mod.route("/api/admin/freeze", methods=["GET"])
+@login_required
+def admin_get_freeze():
+    """Return the current scoreboard freeze setting (raw UTC ISO, or null)."""
+    if not current_user.is_white_team:
+        return jsonify({"status": "Unauthorized"}), 403
+    setting = Setting.get_setting("scoreboard_freeze_time")
+    value = setting.value if setting else None
+    return jsonify(freeze_time=value or None)
+
+
+@mod.route("/api/admin/freeze", methods=["POST"])
+@login_required
+def admin_set_freeze():
+    """Set or clear the wall-clock scoreboard freeze.
+
+    Accepts ``freeze_time`` as an ISO datetime. A naive value (no offset) is
+    interpreted in the competition timezone (config.timezone), matching how times
+    are displayed everywhere else. An empty value clears the freeze. Stored as a
+    naive-UTC ISO string.
+    """
+    if not current_user.is_white_team:
+        return jsonify({"status": "Unauthorized"}), 403
+
+    data = request.get_json(silent=True) or request.form
+    raw = (data.get("freeze_time") or "").strip()
+
+    if not raw:
+        value = ""
+    else:
+        try:
+            dt = parse(raw)
+        except (ValueError, TypeError, OverflowError):
+            return jsonify({"status": "error", "message": "Invalid datetime"}), 400
+        if dt.tzinfo is None:
+            dt = pytz.timezone(config.timezone).localize(dt)
+        value = dt.astimezone(pytz.utc).replace(tzinfo=None).isoformat()
+
+    setting = Setting.get_setting("scoreboard_freeze_time")
+    setting.value = value
+    db.session.add(setting)
+    db.session.commit()
+    Setting.clear_cache("scoreboard_freeze_time")
+
+    # Freeze changes what every non-white viewer sees; refresh the standings caches.
+    update_scoreboard_data()
+    update_overview_data()
+    update_flags_data()
+
+    return jsonify({"status": "success", "freeze_time": value or None})
+
+
+def _parse_competition_time(raw):
+    """Parse an operator-entered datetime into a naive-UTC datetime, or None.
+
+    A naive value (no offset) is interpreted in the competition timezone
+    (``config.timezone``), matching how the freeze is parsed and how times are
+    displayed everywhere else. Returns None on empty or unparseable input.
+    """
+    raw = (raw or "").strip()
+    if not raw:
+        return None
+    try:
+        dt = parse(raw)
+    except (ValueError, TypeError, OverflowError):
+        return None
+    if dt.tzinfo is None:
+        dt = pytz.timezone(config.timezone).localize(dt)
+    return dt.astimezone(pytz.utc).replace(tzinfo=None)
+
+
+def _refresh_after_window_change():
+    """Invalidate the schedule cache and the standings caches a window affects."""
+    clear_windows_cache()
+    update_scoreboard_data()
+    update_overview_data()
+    update_flags_data()
+
+
+@mod.route("/api/admin/windows", methods=["GET"])
+@login_required
+def admin_get_windows():
+    """List competition windows (white team only), in schedule order."""
+    if not current_user.is_white_team:
+        return jsonify({"status": "Unauthorized"}), 403
+    windows = db.session.query(CompetitionWindow).order_by(CompetitionWindow.start_time).all()
+    return jsonify(windows=[w.to_dict() for w in windows])
+
+
+@mod.route("/api/admin/windows", methods=["POST"])
+@login_required
+def admin_create_window():
+    """Create a competition window.
+
+    Accepts ``name`` (optional), ``start_time`` and ``end_time`` as ISO datetimes.
+    Naive values are interpreted in the competition timezone; stored naive-UTC.
+    Rejects a window whose end is not strictly after its start.
+    """
+    if not current_user.is_white_team:
+        return jsonify({"status": "Unauthorized"}), 403
+
+    data = request.get_json(silent=True) or request.form
+    name = (data.get("name") or "").strip() or None
+    start = _parse_competition_time(data.get("start_time"))
+    end = _parse_competition_time(data.get("end_time"))
+
+    if start is None or end is None:
+        return jsonify({"status": "error", "message": "Valid start_time and end_time are required"}), 400
+    if end <= start:
+        return jsonify({"status": "error", "message": "end_time must be after start_time"}), 400
+
+    window = CompetitionWindow(name=name, start_time=start, end_time=end, enabled=True)
+    db.session.add(window)
+    db.session.commit()
+
+    _refresh_after_window_change()
+    return jsonify({"status": "success", "window": window.to_dict()})
+
+
+@mod.route("/api/admin/windows/<int:window_id>", methods=["PATCH"])
+@login_required
+def admin_toggle_window(window_id):
+    """Enable/disable a window without deleting it (park a cancelled day)."""
+    if not current_user.is_white_team:
+        return jsonify({"status": "Unauthorized"}), 403
+    window = db.session.get(CompetitionWindow, window_id)
+    if window is None:
+        return jsonify({"status": "error", "message": "Not found"}), 404
+
+    data = request.get_json(silent=True) or request.form
+    if "enabled" in data:
+        raw = data.get("enabled")
+        window.enabled = raw is True or str(raw).lower() in ("true", "1", "on", "yes")
+    else:
+        window.enabled = not window.enabled
+    db.session.add(window)
+    db.session.commit()
+
+    _refresh_after_window_change()
+    return jsonify({"status": "success", "window": window.to_dict()})
+
+
+@mod.route("/api/admin/windows/<int:window_id>", methods=["DELETE"])
+@login_required
+def admin_delete_window(window_id):
+    """Delete a competition window."""
+    if not current_user.is_white_team:
+        return jsonify({"status": "Unauthorized"}), 403
+    window = db.session.get(CompetitionWindow, window_id)
+    if window is None:
+        return jsonify({"status": "error", "message": "Not found"}), 404
+    db.session.delete(window)
+    db.session.commit()
+    _refresh_after_window_change()
+    return jsonify({"status": "success"})
+
+
+def _upsert_setting(name, value):
+    """Set a setting, creating the row if a pre-feature DB never seeded it."""
+    setting = Setting.get_setting(name)
+    if setting is None:
+        setting = Setting(name=name, value=value)
+    else:
+        setting.value = value
+    db.session.add(setting)
+    db.session.commit()
+    Setting.clear_cache(name)
+
+
+@mod.route("/api/admin/weighted_scoring", methods=["GET"])
+@login_required
+def admin_get_weighted_scoring():
+    """Return the current weighted-scoring configuration (white team only)."""
+    if not current_user.is_white_team:
+        return jsonify({"status": "Unauthorized"}), 403
+
+    def _float(name, default):
+        setting = Setting.get_setting(name)
+        try:
+            return float(setting.value) if setting else default
+        except (ValueError, TypeError):
+            return default
+
+    enabled = Setting.get_setting("weighted_scoring_enabled")
+    return jsonify(
+        enabled=bool(enabled.value) if enabled else False,
+        service_weight=_float("service_weight", 1.0),
+        inject_weight=_float("inject_weight", 1.0),
+        flag_weight=_float("flag_weight", 1.0),
+    )
+
+
+@mod.route("/api/admin/weighted_scoring", methods=["POST"])
+@login_required
+def admin_set_weighted_scoring():
+    """Set weighted-scoring configuration (white team only).
+
+    Accepts ``enabled`` (bool) and ``service_weight`` / ``inject_weight`` /
+    ``flag_weight`` (numbers >= 0). Absent fields are left unchanged; a present
+    weight that is negative or unparseable is rejected.
+    """
+    if not current_user.is_white_team:
+        return jsonify({"status": "Unauthorized"}), 403
+
+    data = request.get_json(silent=True) or request.form
+
+    if "enabled" in data:
+        raw = data.get("enabled")
+        _upsert_setting("weighted_scoring_enabled", raw is True or str(raw).lower() in ("true", "1", "on", "yes"))
+
+    for name in ("service_weight", "inject_weight", "flag_weight"):
+        if name in data:
+            try:
+                weight = float(data[name])
+            except (ValueError, TypeError):
+                return jsonify({"status": "error", "message": f"{name} must be a number"}), 400
+            if weight < 0:
+                return jsonify({"status": "error", "message": f"{name} must be >= 0"}), 400
+            _upsert_setting(name, str(weight))
+
+    # Weights change every team's combined total and the red flag total.
+    update_scoreboard_data()
+    update_overview_data()
+    update_flags_data()
+    publish_event("settings_changed", {"setting": "weighted_scoring"})
+
+    return jsonify({"status": "success"})

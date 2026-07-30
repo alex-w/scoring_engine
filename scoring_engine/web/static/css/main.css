@@ -794,10 +794,29 @@ body.team-white .navbar-brand {
     border-color: var(--border);
 }
 
+/* Team-name headers stay on one line so a wide competition (many teams) scrolls
+   horizontally in its container rather than wrapping into unreadable rows. */
+.overview-matrix thead th {
+    white-space: nowrap;
+}
+
+/* Pin the label column (service names / metric rows) so it stays visible while
+   scrolling through the team columns. An opaque background keeps the scrolling
+   cells from showing through it. */
 .overview-matrix th:first-child,
 .overview-matrix td:first-child {
     text-align: left;
     padding-left: 1.25rem;
+    position: sticky;
+    left: 0;
+    z-index: 2;
+    background: var(--surface);
+    border-right: 1px solid var(--border-strong);
+}
+
+.overview-matrix thead th:first-child {
+    z-index: 3;
+    background: var(--raised);
 }
 
 .overview-matrix thead th {

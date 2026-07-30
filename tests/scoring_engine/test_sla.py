@@ -10,6 +10,7 @@ from scoring_engine.models.round import Round
 from scoring_engine.models.service import Service
 from scoring_engine.models.setting import Setting
 from scoring_engine.models.team import Team
+from scoring_engine.scores import materialize_all_rounds
 from scoring_engine.sla import (
     SLAConfig,
     apply_dynamic_scoring_to_round,
@@ -869,6 +870,9 @@ class TestMultipleTeams:
                 db.session.add(check)
 
         db.session.commit()
+        # Materialize round_score, as the engine does at round close, so the
+        # score reads (now backed by round_score) reflect these checks.
+        materialize_all_rounds(db.session)
         return teams
 
     def test_different_penalties_per_team(self):
@@ -1069,6 +1073,7 @@ class TestCombinedDynamicScoringAndPenalties:
             db.session.add(check)
 
         db.session.commit()
+        materialize_all_rounds(db.session)
         return team, service
 
     def test_early_rounds_with_sla_penalty(self):
@@ -1092,6 +1097,7 @@ class TestCombinedDynamicScoringAndPenalties:
         # Penalty = 1000 * 10% = 100 points (penalty based on dynamic score)
         # Adjusted = 1000 - 100 = 900
 
+        materialize_all_rounds(db.session)
         base_score = calculate_team_base_score_with_dynamic(team, config)
         assert base_score == 1000, f"Expected 1000 base with 2x early multiplier, got {base_score}"
 
@@ -1144,6 +1150,7 @@ class TestCombinedDynamicScoringAndPenalties:
         # Penalty = 200 * 30% = 60 points (penalty based on dynamic score)
         # Adjusted = 200 - 60 = 140
 
+        materialize_all_rounds(db.session)
         base_score = calculate_team_base_score_with_dynamic(team, config)
         assert base_score == 200, f"Expected 200 base with 0.5x late multiplier, got {base_score}"
 
@@ -1219,6 +1226,7 @@ class TestCombinedDynamicScoringAndPenalties:
         # Penalty points = 3150 * 40% = 1260 (based on dynamic score)
         # Adjusted = 3150 - 1260 = 1890
 
+        materialize_all_rounds(db.session)
         base_score = calculate_team_base_score_with_dynamic(team, config)
         assert base_score == 3150, f"Expected 3150 base with mixed multipliers, got {base_score}"
 
@@ -1277,6 +1285,7 @@ class TestCombinedDynamicScoringAndPenalties:
             db.session.add(check3)
 
         db.session.commit()
+        materialize_all_rounds(db.session)
 
         # Team 1: 10 * 100 * 2.0 = 2000 dynamic, no penalty
         score1 = calculate_team_adjusted_score(team1, config)
@@ -1343,6 +1352,7 @@ class TestCombinedDynamicScoringAndPenalties:
 
         config = self._create_combined_config()
 
+        materialize_all_rounds(db.session)
         base_score = calculate_team_base_score_with_dynamic(team, config)
         assert base_score == 50, f"Expected 50 dynamic base score, got {base_score}"
 
@@ -1395,6 +1405,7 @@ class TestCombinedDynamicScoringAndPenalties:
 
         db.session.commit()
 
+        materialize_all_rounds(db.session)
         base_score = calculate_team_base_score_with_dynamic(team, config)
         assert base_score == 100, f"Expected 100 dynamic base score, got {base_score}"
 
@@ -1417,6 +1428,7 @@ class TestCombinedDynamicScoringAndPenalties:
         check_results = [False] * 10  # 10 failures
         team, service = self._create_team_with_rounds(check_results, points=100)
 
+        materialize_all_rounds(db.session)
         base_score = calculate_team_base_score_with_dynamic(team, config)
         assert base_score == 0, "All failures should result in 0 base score"
 

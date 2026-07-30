@@ -181,6 +181,16 @@ def announcements():
         return redirect(url_for("auth.unauthorized"))
 
 
+@mod.route("/admin/adjustments")
+@login_required
+def adjustments():
+    if current_user.is_white_team:
+        teams = db.session.query(Team).filter(Team.color != "White").order_by(Team.name).all()
+        return render_template("admin/adjustments.html", teams=teams)
+    else:
+        return redirect(url_for("auth.unauthorized"))
+
+
 @mod.route("/admin/welcome")
 @login_required
 def welcome():

@@ -37,7 +37,7 @@ from scoring_engine.checks.winrm import WinRMCheck
 from scoring_engine.checks.wordpress import WordpressCheck
 from scoring_engine.db import db
 from scoring_engine.engine.basic_check import CHECK_SUCCESS_TEXT, CHECK_TIMED_OUT_TEXT
-from scoring_engine.engine.engine import Engine
+from scoring_engine.engine.engine import Engine, _utcnow
 from scoring_engine.models.check import Check
 from scoring_engine.models.environment import Environment
 from scoring_engine.models.kb import KB
@@ -1085,7 +1085,7 @@ class TestConsecutiveRoundFailureBound:
         engine = Engine()
         sleeps = self._record_sleeps(engine)
 
-        engine._sleep_after_failed_round(datetime.now(), consecutive_failures=99)
+        engine._sleep_after_failed_round(_utcnow(), consecutive_failures=99)
 
         assert sleeps == [engine.ROUND_FAILURE_BACKOFF_MAX]
 
@@ -1099,6 +1099,57 @@ class TestConsecutiveRoundFailureBound:
         engine = Engine()
         sleeps = self._record_sleeps(engine)
 
-        engine._sleep_after_failed_round(datetime.now(), consecutive_failures=1)
+        engine._sleep_after_failed_round(_utcnow(), consecutive_failures=1)
 
         assert sleeps == [120]
+
+
+class TestUtcNow:
+    def test_returns_naive_utc(self):
+        from datetime import timezone
+
+        now = _utcnow()
+        assert now.tzinfo is None  # naive
+        # Within a couple seconds of real UTC (not local time).
+        delta = abs((datetime.now(timezone.utc).replace(tzinfo=None) - now).total_seconds())
+        assert delta < 5
+
+
+class TestCompetitionWindowGating:
+    def test_engine_idles_outside_window(self):
+        """With a competition window entirely in the past, the engine must idle
+        (sleep pause_duration) instead of running a round."""
+        from scoring_engine.models.competition_window import CompetitionWindow
+        from scoring_engine.models.round import Round
+
+        db.session.add(
+            CompetitionWindow(
+                name="past",
+                start_time=datetime(2020, 1, 1, 9, 0, 0),
+                end_time=datetime(2020, 1, 1, 17, 0, 0),
+                enabled=True,
+            )
+        )
+        db.session.commit()
+
+        engine = Engine()
+        sleeps = []
+
+        def fake_sleep(seconds):
+            sleeps.append(seconds)
+            engine.last_round = True  # break the loop after one idle cycle
+
+        engine.sleep = fake_sleep
+        engine.run()
+
+        assert sleeps  # it idled at least once
+        assert engine.rounds_run == 0
+        assert db.session.query(Round).count() == 0
+
+    def test_engine_runs_with_no_windows(self):
+        """No windows configured -> engine_should_run is unconditionally True, so
+        the loop reaches the round body (which we short-circuit via sleep)."""
+        from scoring_engine.engine.engine import engine_should_run
+
+        engine = Engine()
+        assert engine_should_run(session=db.session) is True

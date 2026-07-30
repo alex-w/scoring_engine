@@ -113,3 +113,20 @@ dynamic_scoring_late_multiplier = 0.5
 # Inject Score Visibility
 # Show inject scores on the public scoreboard (default: hidden for private grading)
 inject_scores_visible = False
+
+# Red-Team Flag Scoring
+# Flat points awarded to the red team per captured flag, by permission level.
+# A captured flag (a Solve reported by a blue team's agent) adds to the red
+# team's total; the compromised blue team's own score is not reduced.
+flag_points_user = 100
+flag_points_root = 200
+
+# Weighted Scoring
+# Rebalance how service uptime, injects, and flag captures combine into the
+# scoreboard total (e.g. dampen flags if they dominate, or make injects count
+# for more). Each weight is a multiplier; disabled means every weight is
+# effectively 1.0 and totals are unchanged.
+weighted_scoring_enabled = False
+service_weight = 1.0
+inject_weight = 1.0
+flag_weight = 1.0

@@ -683,9 +683,7 @@ class TestFlagsAPI:
         db.session.add_all(flags)
         db.session.flush()
 
-        solves = [
-            Solve(host=solves_data[i], team_id=self.blue_team1.id, flag_id=flags[i].id) for i in range(4)
-        ]
+        solves = [Solve(host=solves_data[i], team_id=self.blue_team1.id, flag_id=flags[i].id) for i in range(4)]
         db.session.add_all(solves)
         db.session.commit()
 
@@ -737,3 +735,51 @@ class TestFlagsAPI:
         team1_entry = next(e for e in data if e["team"] == "Blue Team 1")
         assert team1_entry["nix_score"] == 4.0
         assert team1_entry["total_score"] == 4.0
+
+    # /api/flags/score (red-team flag score) --------------------------------
+
+    def _capture(self, team, perm, host):
+        flag = Flag(
+            type=FlagTypeEnum.file,
+            platform=Platform.nix,
+            perm=perm,
+            data={"path": "/tmp/f", "content": "x"},
+            start_time=datetime.now(timezone.utc) - timedelta(minutes=5),
+            end_time=datetime.now(timezone.utc) + timedelta(hours=1),
+            dummy=False,
+        )
+        db.session.add(flag)
+        db.session.commit()
+        db.session.add(Solve(host=host, team=team, flag=flag))
+        db.session.commit()
+
+    def test_api_flags_score_requires_auth(self):
+        resp = self.client.get("/api/flags/score")
+        assert resp.status_code == 302  # redirected to login
+
+    def test_api_flags_score_blue_team_unauthorized(self):
+        self.login("blueuser1")
+        resp = self.client.get("/api/flags/score")
+        assert resp.status_code == 403
+
+    def test_api_flags_score_red_team_authorized(self):
+        self.login("reduser")
+        resp = self.client.get("/api/flags/score")
+        assert resp.status_code == 200
+
+    def test_api_flags_score_white_team_authorized(self):
+        self.login("whiteuser")
+        resp = self.client.get("/api/flags/score")
+        assert resp.status_code == 200
+
+    def test_api_flags_score_values(self):
+        self._capture(self.blue_team1, Perm.user, "h1")
+        self._capture(self.blue_team1, Perm.root, "h1")
+        self._capture(self.blue_team2, Perm.user, "h1")
+        self.login("whiteuser")
+        data = self.client.get("/api/flags/score").json
+        assert data["red_total"] == 400  # 100 + 200 + 100
+        assert data["points"] == {"user": 100, "root": 200}
+        by_team = {row["team"]: row["points"] for row in data["by_team"]}
+        assert by_team["Blue Team 1"] == 300
+        assert by_team["Blue Team 2"] == 100

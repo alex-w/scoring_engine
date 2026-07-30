@@ -24,6 +24,23 @@ def make_cache_key(*args, **kwargs):
     return f"{request_path}_team_{g.user.team.id}"
 
 
+def get_effective_freeze():
+    """Return ``(frozen_view, freeze_time)`` for the current viewer.
+
+    The scoreboard freeze is wall-clock. When ``scoreboard_freeze_time`` is set,
+    every viewer EXCEPT the white team sees the standings frozen at that instant;
+    the white team always sees live numbers (with a banner in the UI). Returns
+    ``(False, None)`` when not frozen or when the viewer is white.
+    """
+    from scoring_engine.scores import get_freeze_time
+
+    freeze_time = get_freeze_time()
+    is_white = current_user.is_authenticated and current_user.is_white_team
+    if freeze_time is None or is_white:
+        return False, None
+    return True, freeze_time
+
+
 mod = Blueprint("api", __name__)
 
 
@@ -55,4 +72,18 @@ def events_token():
     return jsonify({"token": token})
 
 
-from . import admin, agent, announcements, flags, injects, notifications, overview, profile, scoreboard, service, sla, stats, team
+from . import (
+    admin,
+    agent,
+    announcements,
+    flags,
+    injects,
+    notifications,
+    overview,
+    profile,
+    scoreboard,
+    service,
+    sla,
+    stats,
+    team,
+)
