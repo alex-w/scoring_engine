@@ -1102,16 +1102,22 @@ def admin_get_ungraded_injects():
         .filter(Inject.status.in_(("Submitted", "Resubmitted")))
         .all()
     )
-    data = [
-        {
-            "inject_id": inject.id,
-            "team": inject.team.name,
-            "title": inject.template.title,
-            "status": inject.status,
-            "file_count": len(inject.files),
-        }
-        for inject in injects
-    ]
+    data = []
+    for inject in injects:
+        # Skip orphaned submissions with no team/template: they can't be attributed
+        # or graded, and dereferencing the missing relation would 500 the whole
+        # list (the scores endpoints guard the same way -- see `if inject.team`).
+        if inject.team is None or inject.template is None:
+            continue
+        data.append(
+            {
+                "inject_id": inject.id,
+                "team": inject.team.name,
+                "title": inject.template.title,
+                "status": inject.status,
+                "file_count": len(inject.files),
+            }
+        )
     data.sort(key=lambda d: (d["team"].lower(), d["title"].lower()))
     return jsonify(data=data)
 
@@ -1140,6 +1146,10 @@ def admin_download_ungraded_injects():
     files_added = 0
     with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zip_file:
         for inject in injects:
+            # Orphaned submissions (no team/template) can't be laid out in the
+            # archive and aren't gradeable; skip them rather than 500.
+            if inject.team is None or inject.template is None:
+                continue
             team_dir = secure_filename(inject.team.name) or f"team_{inject.team_id}"
             inject_dir = secure_filename(inject.template.title) or f"inject_{inject.id}"
             for f in inject.files:
