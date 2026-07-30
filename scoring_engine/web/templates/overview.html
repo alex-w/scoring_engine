@@ -79,8 +79,10 @@
     }
 
     function renderCell(value, rowLabel, colIndex, serviceRowIndex) {
+        // Column 0 is the row label (service name); team names / service names are
+        // stored verbatim, so escape everything that becomes markup here.
         if (colIndex === 0) {
-            return '<td><span class="fw-bold">' + value + '</span></td>';
+            return '<td><span class="fw-bold">' + ScoringEngineUtils.escapeHtml(value) + '</span></td>';
         }
 
         if (rowLabel === 'Current Score') {
@@ -95,8 +97,21 @@
             return '<td>' + value + medal + '</td>';
         }
 
-        if (rowLabel === 'SLA Penalties' || rowLabel === 'Up/Down Ratio') {
-            return '<td>' + value + '</td>';
+        if (rowLabel === 'Up/Down Ratio') {
+            var up = (value && value.up) || 0;
+            var down = (value && value.down) || 0;
+            return '<td>'
+                + '<span class="text-success">' + up + ' <i class="bi bi-arrow-up"></i></span> / '
+                + '<span class="text-danger">' + down + ' <i class="bi bi-arrow-down"></i></span>'
+                + '</td>';
+        }
+
+        if (rowLabel === 'SLA Penalties') {
+            var penalty = parseFloat(value) || 0;
+            if (penalty > 0) {
+                return '<td><span class="text-danger">-' + penalty + '</span></td>';
+            }
+            return '<td>0</td>';
         }
 
         // Service status cell
@@ -116,7 +131,7 @@
         if (_serviceIds && serviceRowIndex !== null && _serviceIds[serviceRowIndex]) {
             var sid = _serviceIds[serviceRowIndex][colIndex - 1];
             if (sid) {
-                cellHtml = '<a href="/admin/service/' + sid + '" title="Admin: ' + rowLabel + '">' + cellHtml + '</a>';
+                cellHtml = '<a href="/admin/service/' + sid + '" title="Admin: ' + ScoringEngineUtils.escapeHtml(rowLabel) + '">' + cellHtml + '</a>';
             }
         }
 
@@ -181,8 +196,9 @@
         var $headerRow = $('#overview-header');
         for (var i = 1; i < resp.columns.length; i++) {
             var col = resp.columns[i];
-            var style = col.color ? ' style="border-bottom: 2px solid ' + col.color + '"' : '';
-            $headerRow.append('<th title="' + col.title + '"' + style + '>' + col.title + '</th>');
+            var style = col.color ? ' style="border-bottom: 2px solid ' + ScoringEngineUtils.escapeHtml(col.color) + '"' : '';
+            var title = ScoringEngineUtils.escapeHtml(col.title);
+            $headerRow.append('<th title="' + title + '"' + style + '>' + title + '</th>');
         }
         loadData();
     });

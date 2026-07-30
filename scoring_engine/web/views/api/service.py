@@ -1,4 +1,3 @@
-import html
 import re
 
 from flask import jsonify, request
@@ -28,7 +27,22 @@ def is_valid_user_input(string, only_hostname, only_number):
     elif only_number:
         regex = r"^[0-9]+$"
     else:
-        regex = r"^[A-Za-z0-9\.,@=:\/\-\|\(\)_; !]+$"
+        # Service account credentials.  Any printable ASCII character is allowed
+        # so that real-world passwords (which routinely contain $ & ! " ' < > etc.)
+        # can be entered here.  Two things make this safe rather than reckless:
+        #
+        #   1. BasicCheck.command() shlex.quote()s every argument before it is
+        #      interpolated into the command string the worker runs, so nothing
+        #      here reaches a shell unquoted.
+        #   2. Accounts provisioned from competition.yaml (competition.py) are
+        #      never validated at all, so arbitrary credentials already flow
+        #      through the check pipeline today.  Rejecting them only in the web
+        #      editor made the UI stricter than the primary provisioning path
+        #      without adding any protection.
+        #
+        # Control characters and non-ASCII remain rejected: they are never
+        # intentional in a credential and would corrupt the check output.
+        regex = r"^[\x20-\x7E]+$"
         if string.startswith(" ") or string.endswith(" "):
             return False
     return bool(re.match(regex, string))
@@ -135,15 +149,25 @@ def update_service_account_info():
                 account = db.session.query(Account).get(int(request.form["pk"]))
                 if account:
                     if current_user.team == account.service.team or current_user.is_white_team:
+                        # Stored verbatim.  Escaping here would corrupt the
+                        # credential the worker authenticates with; the templates
+                        # escape these values at render time instead.
                         if field_name == "username":
-                            account.username = html.escape(value)
+                            account.username = value
                         elif field_name == "password":
-                            account.password = html.escape(value)
+                            account.password = value
                         db.session.add(account)
                         db.session.commit()
                         return jsonify({"status": "Updated Account Information"})
             else:
-                return jsonify({"error": "Invalid characters. Allowed: A-Z a-z 0-9 . , @ = : / - | ( ) _ ; and space"})
+                return jsonify(
+                    {
+                        "error": (
+                            "Invalid characters. Credentials may contain any printable ASCII character, "
+                            "with no leading or trailing space."
+                        )
+                    }
+                )
 
     return jsonify({"error": "Incorrect permissions"})
 
@@ -165,7 +189,7 @@ def update_host():
                     if (service.team == current_user.team or current_user.is_white_team) and request.form[
                         "name"
                     ] == "host":
-                        service.host = html.escape(request.form["value"])
+                        service.host = request.form["value"]
                         db.session.add(service)
                         db.session.commit()
                         update_overview_data()
@@ -193,7 +217,7 @@ def update_port():
                     if (service.team == current_user.team or current_user.is_white_team) and request.form[
                         "name"
                     ] == "port":
-                        service.port = int(html.escape(request.form["value"]))
+                        service.port = int(request.form["value"])
                         db.session.add(service)
                         db.session.commit()
                         update_overview_data()

@@ -1453,11 +1453,10 @@ class TestAPI:
         # Find team 2's index (teams ordered by id)
         team2_idx = 2 if team1.id < team2.id else 1
 
-        # The ratio string should show "2 up / 1 down" for team 2 in round 3
-        # Format: '<span class="text-success">2 <span...></span> / <span class="text-danger">1 <span...></span>'
+        # The ratio cell should show 2 up / 1 down for team 2 in round 3
+        # Format: {"up": 2, "down": 1}
         team_ratio = ratio_row[team2_idx]
-        assert ">2 <" in team_ratio, f"Expected 2 services up for team 2, got: {team_ratio}"
-        assert ">1 <" in team_ratio, f"Expected 1 service down for team 2, got: {team_ratio}"
+        assert team_ratio == {"up": 2, "down": 1}, f"Expected 2 up / 1 down for team 2, got: {team_ratio}"
 
     def test_overview_get_data_multiple_teams_all_services_correct(self):
         """Comprehensive test: multiple teams, multiple services, ID divergence.

@@ -87,6 +87,10 @@ services:
       - SCORINGENGINE_EXAMPLE
       - SCORINGENGINE_OVERWRITE_DB
       - SCORINGENGINE_VERSION
+      # Flask session signing key -- see .env.example. Every process that builds
+      # the Flask app needs the same value, otherwise sessions break between
+      # them and on restart.
+      - SCORINGENGINE_SECRET_KEY
   engine:
     image: scoringengine/engine
     build:
@@ -112,6 +116,7 @@ services:
     environment:
       - SCORINGENGINE_EXAMPLE
       - SCORINGENGINE_VERSION
+      - SCORINGENGINE_SECRET_KEY
   worker:
     image: scoringengine/worker
     build:
@@ -154,13 +159,39 @@ services:
         condition: service_started
       mysql:
         condition: service_healthy
+      redis:
+        condition: service_healthy
       bootstrap:
         condition: service_completed_successfully
     healthcheck:
-      # uwsgi exposes an HTTP stats server on port 9191; use it for liveness
-      test: ["CMD", "curl", "-f", "http://localhost:9191"]
-      interval: 30s
-      timeout: 3s
+      # Readiness: the app answers AND can reach its database and Redis.
+      # Served on uwsgi's loopback-only HTTP socket (see docker/web/Dockerfile).
+      #
+      # nginx gates its own start on `web: condition: service_healthy`, so these
+      # timings decide how long the whole stack waits at boot and how much
+      # dependency flapping it tolerates before compose gives up.
+      #
+      # start_period: readiness (unlike the old liveness probe) fails until
+      #   MariaDB and Redis are actually answering queries. Failures inside this
+      #   window do not count against `retries`, so a slow database start can no
+      #   longer burn the retry budget before the app is legitimately ready.
+      #   90s covers importing Flask/SQLAlchemy, forking four uWSGI workers and
+      #   opening the first DB/Redis connections on a cold, disk-bound host.
+      # interval: dropped 30s -> 10s. Docker fires the first probe only after
+      #   one interval, so this is also how long nginx sits idle behind an
+      #   already-ready web container. The probe is a `SELECT 1` plus a Redis
+      #   PING, so 10s costs nothing. (Deliberately not using `start_interval`,
+      #   which would be the tidier tool here: it needs Docker Engine 25+, and
+      #   airgapped competition hosts are frequently older than that.)
+      # timeout: 3s -> 5s. The probe now does two network round-trips through a
+      #   worker pool that is also serving competition traffic; 3s was sized for
+      #   a static stats page.
+      # retries: 10 x 10s = 100s of sustained dependency failure after startup
+      #   before the container is marked unhealthy.
+      test: ["CMD", "curl", "-f", "http://127.0.0.1:5001/health/ready"]
+      start_period: 90s
+      interval: 10s
+      timeout: 5s
       retries: 10
     restart: on-failure
     networks:
@@ -170,6 +201,9 @@ services:
       - check_outputs:/var/check_outputs
     environment:
       - SCORINGENGINE_VERSION
+      # Flask session signing key. Required to scale this service past one
+      # replica and to keep users logged in across restarts. See .env.example.
+      - SCORINGENGINE_SECRET_KEY
 
 volumes:
   check_outputs:

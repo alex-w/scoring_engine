@@ -1,3 +1,4 @@
+import json
 from datetime import datetime, timedelta
 
 import pytest
@@ -200,6 +201,73 @@ class TestFlag:
         assert isinstance(localized, str)
         assert "2025-01-01" in localized
         assert any(tz in localized for tz in ["UTC", "EST", "PST", "MST", "CST"])
+
+    def test_data_round_trips_through_the_database(self):
+        """data is a JSON column, not pickle: it must survive a real round trip."""
+        payload = {
+            "path": "/root/flag.txt",
+            "content": "flag{éà中文}",
+            "port": 8080,
+            "nested": {"list": [1, 2, 3], "null": None, "bool": True},
+            "escaped": "C:\\Windows\\System32",
+        }
+        flag = Flag(
+            type=FlagTypeEnum.file,
+            platform=Platform.nix,
+            data=payload,
+            start_time=datetime(2025, 1, 1, 12, 0, 0),
+            end_time=datetime(2025, 1, 1, 18, 0, 0),
+            perm=Perm.root,
+            dummy=False,
+        )
+        db.session.add(flag)
+        db.session.commit()
+        flag_id = flag.id
+        db.session.expunge_all()
+
+        reloaded = db.session.get(Flag, flag_id)
+        assert reloaded.data == payload
+        assert isinstance(reloaded.data, dict)
+
+    def test_data_is_stored_as_json_text_not_pickle(self):
+        """Guards against a regression back to PickleType."""
+        flag = Flag(
+            type=FlagTypeEnum.file,
+            platform=Platform.nix,
+            data={"path": "/root/flag.txt"},
+            start_time=datetime(2025, 1, 1, 12, 0, 0),
+            end_time=datetime(2025, 1, 1, 18, 0, 0),
+            perm=Perm.root,
+            dummy=False,
+        )
+        db.session.add(flag)
+        db.session.commit()
+
+        raw = db.session.execute(db.text("SELECT data FROM flags WHERE id = :id"), {"id": flag.id}).scalar()
+        if isinstance(raw, bytes):
+            raw = raw.decode("utf-8")
+        assert json.loads(raw) == {"path": "/root/flag.txt"}
+
+    def test_data_is_queryable_in_sql(self):
+        """The whole point of dropping pickle: the column can be queried."""
+        for index, path in enumerate(["/root/a.txt", "/root/b.txt"]):
+            db.session.add(
+                Flag(
+                    type=FlagTypeEnum.file,
+                    platform=Platform.nix,
+                    data={"path": path},
+                    start_time=datetime(2025, 1, 1, 12, 0, 0),
+                    end_time=datetime(2025, 1, 1, 18, 0, 0),
+                    perm=Perm.root,
+                    dummy=False,
+                )
+            )
+        db.session.commit()
+
+        rows = db.session.execute(
+            db.text("SELECT id FROM flags WHERE json_extract(data, '$.path') = '/root/b.txt'")
+        ).fetchall()
+        assert len(rows) == 1
 
 
 class TestSolve:

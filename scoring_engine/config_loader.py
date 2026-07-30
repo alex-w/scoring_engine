@@ -3,7 +3,21 @@
 This module reads an ``engine.conf`` style configuration file and allows
 settings to be overridden via environment variables. Each option is loaded
 from the file unless a corresponding ``SCORINGENGINE_<OPTION>`` variable is
-present in the environment, in which case the environment value wins.
+set to a non-empty value in the environment, in which case the environment
+value wins.
+
+An environment variable that exists but is empty (or contains only whitespace)
+is treated as *not set* and does not override the configuration file. This
+matters because environment files are usually created by copying an example
+(``cp .env.example .env``) and ``docker compose`` happily forwards a bare
+``SCORINGENGINE_FOO=`` line into the container as an empty string. Without this
+rule, an untouched placeholder line would silently blank out a value that was
+correctly set in ``engine.conf`` -- for string options that means an empty
+value, and for ``int``/``float`` options it meant a ``ValueError`` at startup.
+
+The consequence is that an option cannot be forced to an empty value *from the
+environment*; set it empty in the configuration file instead (this is how
+``redis_password`` ships).
 """
 
 import configparser
@@ -71,6 +85,12 @@ class ConfigLoader(object):
         self.worker_refresh_time = self.parse_sources(
             "worker_refresh_time",
             int(self.parser["OPTIONS"]["worker_refresh_time"]),
+            "int",
+        )
+
+        self.max_consecutive_round_failures = self.parse_sources(
+            "max_consecutive_round_failures",
+            int(self.parser["OPTIONS"].get("max_consecutive_round_failures", "3")),
             "int",
         )
 
@@ -148,6 +168,17 @@ class ConfigLoader(object):
             self.parser["OPTIONS"].get("check_output_folder", "/var/check_outputs"),
         )
 
+        # Flask session signing key used by the web application.
+        #
+        # There is deliberately no default value here: shipping a fixed key
+        # would let anyone forge session cookies against every deployment that
+        # never changed it.  An empty string means "not configured", and the
+        # web app generates a random key at startup (and warns loudly).
+        self.secret_key = self.parse_sources(
+            "secret_key",
+            self.parser["OPTIONS"].get("secret_key", ""),
+        )
+
         self.db_uri = self.parse_sources("db_uri", self.parser["OPTIONS"]["db_uri"])
 
         self.cache_type = self.parse_sources("cache_type", self.parser["OPTIONS"]["cache_type"])
@@ -157,6 +188,17 @@ class ConfigLoader(object):
         self.redis_port = self.parse_sources("redis_port", int(self.parser["OPTIONS"]["redis_port"]), "int")
 
         self.redis_password = self.parse_sources("redis_password", self.parser["OPTIONS"]["redis_password"])
+
+        # Mark the session/remember-me cookies Secure so browsers only ever send
+        # them over HTTPS.  Correct for the shipped docker deployment (nginx
+        # terminates TLS and 301s port 80 to 443) but it must stay off for a
+        # plain-HTTP dev run, otherwise the browser drops the cookie and login
+        # silently fails.  Defaults to False so an unconfigured checkout works.
+        self.session_cookie_secure = self.parse_sources(
+            "session_cookie_secure",
+            self.parser["OPTIONS"].get("session_cookie_secure", "false").lower() == "true",
+            "bool",
+        )
 
         # SLA Penalty Configuration
         self.sla_enabled = self.parse_sources(
@@ -243,8 +285,8 @@ class ConfigLoader(object):
             The value parsed from the configuration file. The return type of this
             method will match the type of ``default_value``.
         obj_type : str, optional
-            Expected type of the value. Supported values are ``"str"``, ``"int"``
-            and ``"bool"``. Defaults to ``"str"``.
+            Expected type of the value. Supported values are ``"str"``,
+            ``"int"``, ``"float"`` and ``"bool"``. Defaults to ``"str"``.
 
         Returns
         -------
@@ -252,17 +294,27 @@ class ConfigLoader(object):
             Either the value from ``default_value`` or the value from the
             environment variable ``SCORINGENGINE_<KEY_NAME>`` converted to the
             requested type.
+
+        Notes
+        -----
+        An environment variable that is present but empty (or whitespace only)
+        is deliberately treated as absent, so it does not override a value that
+        was set in the configuration file. See the module docstring for why.
         """
         environment_key = "SCORINGENGINE_{}".format(key_name.upper())
-        if environment_key in os.environ:
-            env_val = os.environ[environment_key]
-            if obj_type.lower() == "int":
-                return int(env_val)
-            elif obj_type.lower() == "float":
-                return float(env_val)
-            elif obj_type.lower() == "bool":
-                return env_val.lower() in ("true", "1", "yes")
-            else:
-                return env_val
-        else:
+        env_val = os.environ.get(environment_key)
+
+        # An empty environment variable means "not configured", not "configure
+        # this to nothing". A commented-out or untouched placeholder line in a
+        # copied .env must never blank out engine.conf.
+        if env_val is None or not env_val.strip():
             return default_value
+
+        if obj_type.lower() == "int":
+            return int(env_val)
+        elif obj_type.lower() == "float":
+            return float(env_val)
+        elif obj_type.lower() == "bool":
+            return env_val.strip().lower() in ("true", "1", "yes")
+        else:
+            return env_val

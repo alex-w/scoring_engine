@@ -138,7 +138,17 @@ def overview_get_columns():
 @mod.route("/api/overview/get_data")
 @cache.cached(make_cache_key=make_cache_key)
 def overview_get_data():
-    """Get overview table data. This endpoint returns positional data matching columns."""
+    """Get overview table data. This endpoint returns positional data matching columns.
+
+    Every row is ``[row_label, team_1_value, team_2_value, ...]`` where the team
+    values line up with the blue team columns from ``/api/overview/get_columns``.
+    Values are pure data (no markup) - the front end owns the presentation:
+
+    - ``Current Score`` / ``Current Place``: stringified integers
+    - ``SLA Penalties``: penalty magnitude as an integer (0 when no penalty)
+    - ``Up/Down Ratio``: ``{"up": <int>, "down": <int>}``
+    - service rows: check result booleans (or ``None`` when unchecked)
+    """
     data = []
     blue_teams = db.session.query(Team).filter(Team.color == "Blue").order_by(Team.id).all()
     blue_team_ids = [team.id for team in blue_teams]
@@ -246,19 +256,16 @@ def overview_get_data():
             else:
                 current_scores.append(str(team_scores.get(blue_team_id, 0)))
             current_places.append(str(ranks_dict.get(blue_team_id, 0)))
+            # Structured up/down counts - presentation is handled by the front end
             service_ratios.append(
-                '<span class="text-success">{0} <i class="bi bi-arrow-up"></i></span> / '
-                '<span class="text-danger">{1} <i class="bi bi-arrow-down"></i></span>'.format(
-                    num_up_services.get(blue_team_id, 0),
-                    num_down_services.get(blue_team_id, 0),
-                )
+                {
+                    "up": num_up_services.get(blue_team_id, 0),
+                    "down": num_down_services.get(blue_team_id, 0),
+                }
             )
-            # Add penalty display (negative number if penalty exists)
-            penalty = penalties_dict.get(blue_team_id, 0)
-            if penalty > 0:
-                sla_penalties_row.append('<span class="text-danger">-{}</span>'.format(penalty))
-            else:
-                sla_penalties_row.append("0")
+            # Penalty magnitude as a number (0 when no penalty); the front end
+            # renders it as a negative value
+            sla_penalties_row.append(penalties_dict.get(blue_team_id, 0))
 
         data.append(current_scores)
         data.append(current_places)

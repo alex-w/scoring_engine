@@ -15,6 +15,7 @@
         <div class="card-body">
           <h5 class="card-title text-center">Update Password</h5>
           <form method="POST" action="{{ url_for('api.admin_update_password') }}" role="form">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
             <div class="mb-3">
               <select class="form-select" name="user_id" id="userSelect">
                 {% for user in users %}
@@ -36,6 +37,7 @@
         <div class="card-body">
           <h5 class="card-title text-center">Add User</h5>
           <form method="POST" action="{{ url_for('api.admin_add_user') }}" role="form">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
             <div class="mb-3">
               <input type="text" class="form-control" name="username" id="userUsername" placeholder="Username" required>
             </div>
@@ -60,6 +62,7 @@
         <div class="card-body">
           <h5 class="card-title text-center">Add Team</h5>
           <form method="POST" action="{{ url_for('api.admin_add_team') }}" role="form">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
             <div class="mb-3">
               <input type="text" class="form-control" name="name" id="team" placeholder="Team Name" required>
             </div>
@@ -90,6 +93,11 @@
     </table>
   </div>
   <script>
+    /* Usernames and team names are stored verbatim, so escape them before
+       building markup. DataTables writes cell content with innerHTML, so the
+       team name/color columns need an escaping renderer too. */
+    var escapeHtml = ScoringEngineUtils.escapeHtml;
+
     /* Formatting function for row details - modify as you need */
     function format (data) {
       var rows = [
@@ -102,7 +110,8 @@
       ];
 
       for (var key in data.users) {
-        rows.push('<tr><td>' + key + '</td><td>' + data.users[key][0] + '</td><td>' + data.users[key][1] + '</td></tr>');
+        rows.push('<tr><td>' + escapeHtml(key) + '</td><td>' + escapeHtml(data.users[key][0]) +
+                  '</td><td>' + escapeHtml(data.users[key][1]) + '</td></tr>');
       }
 
       rows.push('</tbody></table>');
@@ -129,8 +138,8 @@
               "data": null,
               "defaultContent": ''
             },
-            { "data": "name" },
-            { "data": "color" }
+            { "data": "name", "render": ScoringEngineUtils.dtEscape() },
+            { "data": "color", "render": ScoringEngineUtils.dtEscape() }
           ],
           'order': [[2, 'asc']],
           'paging': false,

@@ -256,11 +256,11 @@ class TestOverviewAPI:
         assert places_row[0] == "Current Place"
         assert places_row[1] == "1"
 
-        # Up/Down Ratio row
+        # Up/Down Ratio row - structured counts, no markup
         ratio_row = rows[2]
         assert ratio_row[0] == "Up/Down Ratio"
-        assert "arrow-up" in ratio_row[1]
-        assert "arrow-down" in ratio_row[2]
+        assert ratio_row[1] == {"up": 1, "down": 0}
+        assert ratio_row[2] == {"up": 0, "down": 1}
 
         # Service row (SSH)
         assert any(row[0] == "SSH" for row in rows)
@@ -296,8 +296,11 @@ class TestOverviewAPI:
         db.session.add(svc1)
         db.session.commit()
 
-        # Create enough rounds with failures to exceed SLA threshold (default=5)
-        for i in range(1, 7):
+        # Earn points first - penalties are a percentage of the points earned
+        for i in range(1, 4):
+            self._create_round_with_checks(i, [svc1], [True])
+        # Then create enough rounds with failures to exceed SLA threshold (default=5)
+        for i in range(4, 10):
             self._create_round_with_checks(i, [svc1], [False])
 
         # Enable SLA
@@ -319,6 +322,11 @@ class TestOverviewAPI:
         # Penalty is calculated from consecutive failures exceeding threshold
         # With 6 failures and threshold of 5, there should be a penalty
         assert len(sla_row) >= 2
+        # Penalty is a plain number (magnitude), not a rendered HTML string
+        assert isinstance(sla_row[1], int)
+        assert sla_row[1] > 0
+        # Teams without penalties report 0
+        assert sla_row[2] == 0
 
     def test_get_data_sla_with_scores_uses_adjusted(self):
         """When SLA is enabled, current scores reflect penalty deductions."""
@@ -420,3 +428,80 @@ class TestOverviewAPI:
         assert resp.status_code == 200
         data = resp.json
         assert "service_ids" not in data
+
+    # --- /api/overview/get_data returns data, not markup ---
+
+    def _setup_penalty_scenario(self):
+        """Blue team with a failing service (accrues SLA penalties) plus a passing service."""
+        svc1 = Service(name="SSH", check_name="SSHCheck", host="10.0.0.1", port=22, team=self.blue_team, points=100)
+        svc2 = Service(name="HTTP", check_name="HTTPCheck", host="10.0.0.2", port=80, team=self.blue_team, points=100)
+        svc3 = Service(name="SSH", check_name="SSHCheck", host="10.0.0.3", port=22, team=self.blue_team2, points=100)
+        db.session.add_all([svc1, svc2, svc3])
+        db.session.commit()
+
+        # svc1 earns points first (penalties are a percentage of points earned)
+        for i in range(1, 4):
+            self._create_round_with_checks(i, [svc1, svc2, svc3], [True, True, True])
+        # ...then fails enough consecutive rounds to exceed the default threshold (5)
+        for i in range(4, 10):
+            self._create_round_with_checks(i, [svc1, svc2, svc3], [False, True, True])
+
+        sla_setting = Setting.get_setting("sla_enabled")
+        sla_setting.value = True
+        db.session.commit()
+        Setting.clear_cache("sla_enabled")
+
+    def test_get_data_contains_no_html(self):
+        """The API must return structured data - never markup for a specific front end."""
+        self._setup_penalty_scenario()
+
+        resp = self.client.get("/api/overview/get_data")
+        assert resp.status_code == 200
+        body = resp.get_data(as_text=True)
+        assert "<" not in body
+        assert "span" not in body
+        assert "text-success" not in body
+        assert "text-danger" not in body
+        assert "bi-arrow" not in body
+
+    def test_get_data_white_team_contains_no_html(self):
+        """The white-team response (with service_ids) is also free of markup."""
+        self._setup_penalty_scenario()
+
+        self._login("whiteuser")
+        resp = self.client.get("/api/overview/get_data")
+        assert resp.status_code == 200
+        body = resp.get_data(as_text=True)
+        assert "<" not in body
+        assert "span" not in body
+        assert "bi-arrow" not in body
+        # The white-team-only extra field survives the shape change
+        assert "service_ids" in resp.json
+        assert len(resp.json["service_ids"]) == 2
+
+    def test_get_data_up_down_ratio_is_structured(self):
+        """Up/Down Ratio cells are {"up": int, "down": int} objects."""
+        self._setup_penalty_scenario()
+
+        resp = self.client.get("/api/overview/get_data")
+        rows = resp.json["data"]
+        ratio_row = next(row for row in rows if row[0] == "Up/Down Ratio")
+
+        # blue_team: HTTP up, SSH down. blue_team2: SSH up, nothing down.
+        assert ratio_row[1] == {"up": 1, "down": 1}
+        assert ratio_row[2] == {"up": 1, "down": 0}
+
+    def test_get_data_sla_penalties_are_numeric(self):
+        """SLA Penalties cells are plain numbers (magnitude), not formatted strings."""
+        self._setup_penalty_scenario()
+
+        resp = self.client.get("/api/overview/get_data")
+        rows = resp.json["data"]
+        sla_row = next(row for row in rows if row[0] == "SLA Penalties")
+
+        for cell in sla_row[1:]:
+            assert isinstance(cell, (int, float))
+            assert not isinstance(cell, bool)
+        # blue_team accrued a penalty, blue_team2 did not
+        assert sla_row[1] > 0
+        assert sla_row[2] == 0

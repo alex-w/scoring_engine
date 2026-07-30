@@ -9,19 +9,6 @@ import pytz
 from dateutil.parser import parse
 from flask import flash, jsonify, redirect, request, url_for
 from flask_login import current_user, login_required
-
-
-def _ensure_utc_aware(dt):
-    """Ensure datetime is timezone-aware in UTC. Handles both naive and aware datetimes."""
-    if dt is None:
-        return None
-    if dt.tzinfo is None:
-        # Naive datetime - assume UTC
-        return pytz.utc.localize(dt)
-    # Already aware - convert to UTC
-    return dt.astimezone(pytz.utc)
-
-
 from sqlalchemy.orm import joinedload
 from sqlalchemy.orm.exc import NoResultFound
 from sqlalchemy.sql import func
@@ -38,13 +25,14 @@ from scoring_engine.cache_helper import (
     update_services_navbar,
     update_team_stats,
 )
-from scoring_engine.events import publish_event
 from scoring_engine.celery_stats import CeleryStats
 from scoring_engine.config import config
+from scoring_engine.datetime_utils import ensure_utc_aware
 from scoring_engine.db import db
 from scoring_engine.engine.basic_check import CHECK_FAILURE_TEXT, CHECK_SUCCESS_TEXT, CHECK_TIMED_OUT_TEXT
 from scoring_engine.engine.engine import Engine
 from scoring_engine.engine.execute_command import execute_command
+from scoring_engine.events import publish_event
 from scoring_engine.models.check import Check
 from scoring_engine.models.environment import Environment
 from scoring_engine.models.inject import Inject, InjectComment, InjectRubricScore, RubricItem, Template
@@ -497,8 +485,8 @@ def admin_get_inject_templates_id(template_id):
             deliverable=template.deliverable,
             category=template.category,
             max_score=template.max_score,
-            start_time=_ensure_utc_aware(template.start_time).astimezone(pytz.timezone(config.timezone)).isoformat(),
-            end_time=_ensure_utc_aware(template.end_time).astimezone(pytz.timezone(config.timezone)).isoformat(),
+            start_time=ensure_utc_aware(template.start_time).astimezone(pytz.timezone(config.timezone)).isoformat(),
+            end_time=ensure_utc_aware(template.end_time).astimezone(pytz.timezone(config.timezone)).isoformat(),
             enabled=template.enabled,
             rubric_items=[
                 {"id": x.id, "title": x.title, "description": x.description, "points": x.points, "order": x.order}
@@ -846,34 +834,6 @@ def admin_post_inject_templates():
         return {"status": "Unauthorized"}, 403
 
 
-# @mod.route("/api/admin/injects/templates/export")
-# @login_required
-# def admin_export_inject_templates():
-#     if current_user.is_white_team:
-#         data = []
-#         templates = db.session.query(Template).all()
-#         for template in templates:
-#             data.append(
-#                 dict(
-#                     id=template.id,
-#                     title=template.title,
-#                     scenario=template.scenario,
-#                     deliverable=template.deliverable,
-#                     start_time=template.start_time,
-#                     end_time=template.end_time,
-#                     enabled=template.enabled,
-#                     rubric=[
-#                         {"id": x.id, "value": x.value, "deliverable": x.deliverable}
-#                         for x in template.rubric
-#                     ],
-#                     # TODO - export teams
-#                 )
-#             )
-#         return jsonify(data=data)
-#     else:
-#         return {"status": "Unauthorized"}, 403
-
-
 # TODO - Generate injects from templates
 @mod.route("/api/admin/injects/templates/import", methods=["POST"])
 @login_required
@@ -1116,16 +1076,6 @@ def admin_update_template():
     return jsonify({"error": "Incorrect permissions"})
 
 
-# @mod.route("/api/admin/injects/team/<team_id>")
-# @login_required
-# def admin_get_team_injects(team_id):
-#     if current_user.is_white_team:
-#         injects = db.session.query(Inject).filter(team_id == team_id).all()
-#         return jsonify(data=injects)
-#     else:
-#         return {"status": "Unauthorized"}, 403
-
-
 @mod.route("/api/admin/get_teams")
 @login_required
 def admin_get_teams():
@@ -1151,7 +1101,10 @@ def admin_update_password():
                 user_obj = db.session.query(User).filter(User.id == request.form["user_id"]).one()
             except NoResultFound:
                 return redirect(url_for("auth.login"))
-            user_obj.update_password(html.escape(request.form["password"]))
+            # NOTE: do NOT html.escape() the password. It is hashed, never rendered,
+            # and escaping here would silently change the credential so that
+            # /login (which compares the raw string) could never match it.
+            user_obj.update_password(request.form["password"])
             user_obj.authenticated = False
             db.session.add(user_obj)
             db.session.commit()
@@ -1170,9 +1123,13 @@ def admin_add_user():
     if current_user.is_white_team:
         if "username" in request.form and "password" in request.form and "team_id" in request.form:
             team_obj = db.session.query(Team).filter(Team.id == request.form["team_id"]).one()
+            # NOTE: credentials are stored verbatim (the password is hashed). Escaping
+            # them here would silently change them so that /login, which compares the
+            # raw submitted values, could never match. Escaping happens at render time
+            # (Jinja autoescapes; JS-built markup escapes explicitly).
             user_obj = User(
-                username=html.escape(request.form["username"]),
-                password=html.escape(request.form["password"]),
+                username=request.form["username"],
+                password=request.form["password"],
                 team=team_obj,
             )
             db.session.add(user_obj)
@@ -1191,7 +1148,12 @@ def admin_add_user():
 def admin_add_team():
     if current_user.is_white_team:
         if "name" in request.form and "color" in request.form:
-            team_obj = Team(html.escape(request.form["name"]), html.escape(request.form["color"]))
+            # NOTE: team names are stored verbatim, exactly as competition.py stores the
+            # ones defined in the YAML. Escaping here would make an admin-created team
+            # named "Team <1>" render as "Team &lt;1&gt;" (double-escaped, since every
+            # render site escapes), and would break agent PSK derivation, which hashes
+            # the raw team name. Escaping happens at render time instead.
+            team_obj = Team(request.form["name"], request.form["color"])
             db.session.add(team_obj)
             db.session.commit()
             flash("Team successfully added.", "success")

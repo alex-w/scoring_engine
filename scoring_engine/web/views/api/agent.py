@@ -20,6 +20,7 @@ from scoring_engine.models.round import Round
 from scoring_engine.models.service import Service
 from scoring_engine.models.setting import Setting
 from scoring_engine.models.team import Team
+from scoring_engine.web.csrf import csrf
 
 from . import mod
 
@@ -54,7 +55,12 @@ class BtaPayloadEncryption:
 
 
 @mod.route("/api/agent/checkin", methods=["POST"])
+@csrf.exempt
 def agent_checkin_post():
+    # Machine-to-machine: black team agents authenticate with an AES-GCM sealed
+    # payload keyed on the shared PSK and never present a session cookie, so
+    # there is nothing for a cross-site request to ride on and no way for the
+    # agent to fetch a CSRF token.  Must stay exempt or every agent breaks.
     team_input = request.args.get("t", None)
     if team_input is None:
         abort(400)

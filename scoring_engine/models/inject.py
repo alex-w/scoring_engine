@@ -1,23 +1,13 @@
 from datetime import datetime, timezone
 
 import pytz
-from sqlalchemy import Column, DateTime, ForeignKey, Integer, String, Text, Unicode, UnicodeText
+from sqlalchemy import Column, DateTime, ForeignKey, Index, Integer, String, Text, Unicode, UnicodeText
 from sqlalchemy.orm import relationship
 from sqlalchemy.sql.sqltypes import Boolean
 
 from scoring_engine.config import config
+from scoring_engine.datetime_utils import ensure_utc_aware
 from scoring_engine.models.base import Base
-
-
-def _ensure_utc_aware(dt):
-    """Ensure datetime is timezone-aware in UTC. Handles both naive and aware datetimes."""
-    if dt is None:
-        return None
-    if dt.tzinfo is None:
-        return pytz.utc.localize(dt)
-    return dt.astimezone(pytz.utc)
-
-
 
 INJECT_CATEGORIES = ["Business", "Technical", "Incident Response"]
 
@@ -64,7 +54,7 @@ class Template(Base):
     @property
     def localized_start_time(self):
         return (
-            _ensure_utc_aware(self.start_time)
+            ensure_utc_aware(self.start_time)
             .astimezone(pytz.timezone(config.timezone))
             .strftime("%Y-%m-%d %H:%M:%S %Z")
         )
@@ -72,7 +62,7 @@ class Template(Base):
     @property
     def localized_end_time(self):
         return (
-            _ensure_utc_aware(self.end_time).astimezone(pytz.timezone(config.timezone)).strftime("%Y-%m-%d %H:%M:%S %Z")
+            ensure_utc_aware(self.end_time).astimezone(pytz.timezone(config.timezone)).strftime("%Y-%m-%d %H:%M:%S %Z")
         )
 
 
@@ -99,6 +89,10 @@ class RubricItem(Base):
 
 class Inject(Base):
     __tablename__ = "inject"
+    # Team.current_inject_score filters WHERE team_id = ? AND status = 'Graded';
+    # api/scoreboard.py and api/admin.py filter status = 'Graded' and GROUP BY
+    # team_id, which this index can satisfy as an ordered index-only scan.
+    __table_args__ = (Index("ix_inject_team_id_status", "team_id", "status"),)
     id = Column(Integer, primary_key=True)
     status = Column(String(255), default="Draft")
     enabled = Column(Boolean, nullable=False, default=True)
@@ -150,6 +144,17 @@ class InjectRubricScore(Base):
 
 
 class InjectComment(Base):
+    """A comment on an inject.
+
+    ``content`` is stored verbatim -- both blue-team authored comments and the
+    auto-generated audit lines (which embed ``current_user.username``, itself
+    stored verbatim). Nothing HTML-escapes it on write on purpose: escaping the
+    source would double-escape once the render site escapes, and would leave the
+    stored text different from what the user typed. Every render site is
+    responsible for escaping (``ScoringEngineUtils.escapeHtml`` in the inject
+    templates, Jinja autoescaping elsewhere).
+    """
+
     __tablename__ = "inject_comment"
     id = Column(Integer, primary_key=True)
     content = Column(Text, nullable=False)

@@ -24,6 +24,8 @@ Configuration Keys
 ------------------
 .. note:: Each of these config keys can be expressed via environment variables (and take precendence over the values defined in the file). IE: To define target_round_time, I'd set SCORINGENGINE_TARGET_ROUND_TIME=3.
 
+.. note:: An environment variable that exists but is **empty** (or whitespace only) is treated as *unset* and does **not** override the config file. A leftover ``SCORINGENGINE_FOO=`` line in a copied ``.env`` therefore cannot silently blank out a value you configured in ``engine.conf``. If you genuinely want an option to be empty, leave it empty in the config file instead (this is how ``redis_password`` ships).
+
 .. list-table::
    :widths: 25 50
    :header-rows: 1
@@ -40,6 +42,8 @@ Configuration Keys
      - The length of time in minutes before a flag becomes active that BTA can grab the flag details
    * - worker_refresh_time
      - Amount of time (seconds) the engine will sleep for in-between polls of worker status
+   * - max_consecutive_round_failures
+     - How many rounds may fail back to back before the engine gives up and exits non-zero. A failed round is rolled back and retried (transient database blips should not stop a competition), but an error that repeats every round is not transient, so the engine exits and lets the container restart make the problem visible. Default is 3. Set to 0 to retry forever (not recommended)
    * - worker_num_concurrent_tasks
      - The number of concurrent tasks the worker will run. Set to -1 to default to number of processors.
    * - worker_queue
@@ -58,6 +62,8 @@ Configuration Keys
      - Local timezone of the competition
    * - debug
      - Determines wether or not the engine should be run in debug mode (useful for development). The worker will also display output from all checks.
+   * - secret_key
+     - The key Flask uses to sign session cookies. Must be a long random value and must be identical across restarts and across every web process/container. See `Session Secret Key`_.
    * - db_uri
      - Database connection URI
    * - cache_type
@@ -68,6 +74,8 @@ Configuration Keys
      - The port of the redis server
    * - redis_password
      - The password used to connect to redis (if no password, leave empty)
+   * - session_cookie_secure
+     - A boolean marking the session and remember-me cookies "Secure" so browsers only send them over HTTPS. The bundled docker compose stack terminates TLS at nginx and sets this to True. Leave it False for a plain-HTTP dev run, otherwise the browser drops the session cookie and logins silently fail. (default: False)
    * - sla_enabled
      - A boolean to enable/disable SLA penalties for consecutive service failures
    * - sla_penalty_threshold
@@ -90,3 +98,76 @@ Configuration Keys
      - Round number when late phase begins (default: 50)
    * - dynamic_scoring_late_multiplier
      - Points multiplier for late phase (default: 0.5)
+   * - inject_scores_visible
+     - A boolean to show inject scores on the public scoreboard (default: False, private grading)
+
+
+Session Secret Key
+------------------
+
+The web application signs session cookies with ``secret_key``. It is the only
+configuration key that is security critical *and* has no default, so it is worth
+calling out separately.
+
+**Why it must be set**
+
+* If the key changes, every existing session cookie becomes invalid and all
+  users -- including white team -- are logged out. A key that is generated at
+  startup therefore logs everyone out on every restart, redeploy, or crash loop.
+* If two web processes or containers hold different keys, a session issued by
+  one is rejected by the other. That makes it impossible to run more than one
+  web replica behind a load balancer, i.e. it blocks horizontal scaling
+  entirely.
+
+**Why there is no default**
+
+No key is shipped in ``engine.conf.inc``. A fixed default that operators forget
+to change would let anyone who has read the source forge a session cookie for
+any team, including white team. An unset key is a warning; a shared default key
+would be a vulnerability.
+
+**Generating a key**
+
+Generate it yourself, on a machine you trust:
+
+::
+
+  python -c "import secrets; print(secrets.token_hex(64))"
+
+The engine never generates a key *for* you and prints it. Anything written to
+stdout ends up in the container log stream, which is readable by anyone who can
+run ``docker logs`` and is frequently shipped to a log aggregator -- a signing
+key that appears there should be considered compromised.
+
+**Setting it**
+
+Docker (recommended -- ``docker/engine.conf.inc`` is baked into the image at
+build time, so use the environment instead):
+
+::
+
+  # in .env, next to the other credentials
+  SCORINGENGINE_SECRET_KEY=<paste the generated value>
+
+The ``web``, ``engine``, and ``bootstrap`` services in ``docker-compose.yml``
+already pass this variable through. ``.env.example`` ships this line commented
+out on purpose: an empty ``SCORINGENGINE_SECRET_KEY=`` is still an assignment,
+and compose would forward it into the containers as an empty string. (Since an
+empty environment variable is treated as unset, it no longer overrides the
+config file -- but a commented-out line makes the intent unambiguous.)
+
+Manual install, in ``engine.conf``:
+
+::
+
+  secret_key = <paste the generated value>
+
+**If it is not set**
+
+The application still starts. It generates a random key for that process and
+logs a warning explaining that sessions will not survive a restart and cannot
+scale beyond one process. ``bin/setup`` performs the same check and warns with
+the command to generate a key -- it does not print a key. This is fine for local
+development and never fine for a competition.
+
+.. warning:: Treat the key like a password. Do not commit it, and rotate it if it leaks -- rotating logs everyone out, which is the intended effect.

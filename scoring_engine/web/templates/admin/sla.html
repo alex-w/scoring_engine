@@ -18,6 +18,7 @@
       </p>
 
       <form method="POST" action="{{ url_for('api.admin_update_sla_enabled') }}" role="form" style="margin-bottom: 15px;">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
         <div class="row mb-3">
           <label class="col-sm-3 col-form-label">SLA Penalties</label>
           <div class="col-sm-3">
@@ -32,6 +33,7 @@
       </form>
 
       <form method="POST" action="{{ url_for('api.admin_update_sla_penalty_threshold') }}" role="form">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
         <div class="row mb-3">
           <label class="col-sm-3 col-form-label">Penalty Threshold</label>
           <div class="col-sm-3">
@@ -48,6 +50,7 @@
       </form>
 
       <form method="POST" action="{{ url_for('api.admin_update_sla_penalty_percent') }}" role="form">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
         <div class="row mb-3">
           <label class="col-sm-3 col-form-label">Penalty Percent (%)</label>
           <div class="col-sm-3">
@@ -64,6 +67,7 @@
       </form>
 
       <form method="POST" action="{{ url_for('api.admin_update_sla_penalty_max_percent') }}" role="form">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
         <div class="row mb-3">
           <label class="col-sm-3 col-form-label">Max Penalty (%)</label>
           <div class="col-sm-3">
@@ -80,6 +84,7 @@
       </form>
 
       <form method="POST" action="{{ url_for('api.admin_update_sla_penalty_mode') }}" role="form">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
         <div class="row mb-3">
           <label class="col-sm-3 col-form-label">Penalty Mode</label>
           <div class="col-sm-3">
@@ -100,6 +105,7 @@
       </form>
 
       <form method="POST" action="{{ url_for('api.admin_update_sla_allow_negative') }}" role="form">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
         <div class="row mb-3">
           <label class="col-sm-3 col-form-label">Allow Negative Scores</label>
           <div class="col-sm-3">
@@ -123,6 +129,7 @@
       </p>
 
       <form method="POST" action="{{ url_for('api.admin_update_dynamic_scoring_enabled') }}" role="form" style="margin-bottom: 15px;">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
         <div class="row mb-3">
           <label class="col-sm-3 col-form-label">Dynamic Scoring</label>
           <div class="col-sm-3">
@@ -138,6 +145,7 @@
 
       <h5><strong>Early Phase (Bonus Points)</strong></h5>
       <form method="POST" action="{{ url_for('api.admin_update_dynamic_scoring_early_rounds') }}" role="form">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
         <div class="row mb-3">
           <label class="col-sm-3 col-form-label">Early Phase Rounds</label>
           <div class="col-sm-3">
@@ -154,6 +162,7 @@
       </form>
 
       <form method="POST" action="{{ url_for('api.admin_update_dynamic_scoring_early_multiplier') }}" role="form">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
         <div class="row mb-3">
           <label class="col-sm-3 col-form-label">Early Phase Multiplier</label>
           <div class="col-sm-3">
@@ -171,6 +180,7 @@
 
       <h5><strong>Late Phase (Reduced Points)</strong></h5>
       <form method="POST" action="{{ url_for('api.admin_update_dynamic_scoring_late_start_round') }}" role="form">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
         <div class="row mb-3">
           <label class="col-sm-3 col-form-label">Late Phase Start Round</label>
           <div class="col-sm-3">
@@ -187,6 +197,7 @@
       </form>
 
       <form method="POST" action="{{ url_for('api.admin_update_dynamic_scoring_late_multiplier') }}" role="form">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
         <div class="row mb-3">
           <label class="col-sm-3 col-form-label">Late Phase Multiplier</label>
           <div class="col-sm-3">
@@ -228,7 +239,8 @@ $(document).ready(function() {
         for (var i = 0; i < data.teams.length; i++) {
           var team = data.teams[i];
           html += '<tr>';
-          html += '<td>' + team.team_name + '</td>';
+          // Team names are stored verbatim -- escape before building markup.
+          html += '<td>' + ScoringEngineUtils.escapeHtml(team.team_name) + '</td>';
           html += '<td>' + team.base_score.toLocaleString() + '</td>';
           html += '<td class="text-danger">' + (team.total_penalties > 0 ? '-' + team.total_penalties.toLocaleString() : '0') + '</td>';
           html += '<td><strong>' + team.adjusted_score.toLocaleString() + '</strong></td>';

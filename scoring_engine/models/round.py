@@ -1,27 +1,22 @@
 from datetime import datetime, timezone
 
 import pytz
-from sqlalchemy import Column, DateTime, Integer
+from sqlalchemy import Column, DateTime, Index, Integer
 from sqlalchemy.orm import relationship
 
 from scoring_engine.config import config
+from scoring_engine.datetime_utils import ensure_utc_aware
 from scoring_engine.db import db
 from scoring_engine.models.base import Base
 
 
-def _ensure_utc_aware(dt):
-    """Ensure datetime is timezone-aware in UTC. Handles both naive and aware datetimes."""
-    if dt is None:
-        return None
-    if dt.tzinfo is None:
-        # Naive datetime - assume UTC
-        return pytz.utc.localize(dt)
-    # Already aware - convert to UTC
-    return dt.astimezone(pytz.utc)
-
-
 class Round(Base):
     __tablename__ = "rounds"
+    # Round.number is the de-facto lookup key everywhere: get_last_round_num()
+    # does ORDER BY number DESC LIMIT 1, and the API/admin paths filter on
+    # number = / <= / >=.  Not declared UNIQUE because existing databases may
+    # contain duplicates from partially rolled-back rounds.
+    __table_args__ = (Index("ix_rounds_number", "number"),)
     id = Column(Integer, primary_key=True)
     number = Column(Integer, nullable=False)
     checks = relationship("Check", back_populates="round")
@@ -39,7 +34,7 @@ class Round(Base):
     @property
     def local_round_start(self):
         return (
-            _ensure_utc_aware(self.round_start)
+            ensure_utc_aware(self.round_start)
             .astimezone(pytz.timezone(config.timezone))
             .strftime("%Y-%m-%d %H:%M:%S %Z")
         )

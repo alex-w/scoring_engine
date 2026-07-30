@@ -9,14 +9,15 @@ from sqlalchemy.orm import joinedload
 from werkzeug.utils import secure_filename
 
 from scoring_engine.cache import cache
+from scoring_engine.cache_helper import update_inject_comments, update_inject_data, update_inject_files
 from scoring_engine.config import config
+from scoring_engine.datetime_utils import ensure_utc_aware
 from scoring_engine.db import db
+from scoring_engine.events import publish_event
 from scoring_engine.models.inject import Inject, InjectComment, InjectFile, Template
 from scoring_engine.models.setting import Setting
 from scoring_engine.models.team import Team
 from scoring_engine.models.user import User
-from scoring_engine.cache_helper import update_inject_comments, update_inject_data, update_inject_files
-from scoring_engine.events import publish_event
 from scoring_engine.notifications import notify_inject_comment, notify_inject_submitted
 
 from . import make_cache_key, mod
@@ -28,15 +29,6 @@ def _utcnow_for_comparison(db_datetime):
     if db_datetime is not None and db_datetime.tzinfo is None:
         return now.replace(tzinfo=None)
     return now
-
-
-def _ensure_utc_aware(dt):
-    """Ensure datetime is timezone-aware in UTC. Handles both naive and aware datetimes."""
-    if dt is None:
-        return None
-    if dt.tzinfo is None:
-        return pytz.utc.localize(dt)
-    return dt.astimezone(pytz.utc)
 
 
 @mod.route("/api/injects")
@@ -253,7 +245,7 @@ def api_inject(inject_id):
             "text": comment.content,
             "user": comment.user.username,
             "team": comment.user.team.name,
-            "added": _ensure_utc_aware(comment.created)
+            "added": ensure_utc_aware(comment.created)
             .astimezone(pytz.timezone(config.timezone))
             .strftime("%Y-%m-%d %H:%M:%S %Z"),
         }
@@ -295,7 +287,7 @@ def api_inject_comments(inject_id):
                 "text": comment.content,
                 "user": comment.user.username,
                 "team": comment.user.team.name,
-                "added": _ensure_utc_aware(comment.created)
+                "added": ensure_utc_aware(comment.created)
                 .astimezone(pytz.timezone(config.timezone))
                 .strftime("%Y-%m-%d %H:%M:%S %Z"),
             }

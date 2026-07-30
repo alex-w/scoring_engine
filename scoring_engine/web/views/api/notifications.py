@@ -3,21 +3,11 @@ from flask import jsonify
 from flask_login import current_user, login_required
 
 from scoring_engine.config import config
+from scoring_engine.datetime_utils import ensure_utc_aware
 from scoring_engine.db import db
 from scoring_engine.models.notifications import Notification
 
 from . import mod
-
-
-def _ensure_utc_aware(dt):
-    """Ensure datetime is timezone-aware in UTC. Handles both naive and aware datetimes."""
-    if dt is None:
-        return None
-    if dt.tzinfo is None:
-        # Naive datetime - assume UTC
-        return pytz.utc.localize(dt)
-    # Already aware - convert to UTC
-    return dt.astimezone(pytz.utc)
 
 
 def _get_notifications_data(is_read_filter=None, include_is_read=False):
@@ -43,7 +33,7 @@ def _get_notifications_data(is_read_filter=None, include_is_read=False):
             "id": notification.id,
             "message": notification.message,
             "target": notification.target,
-            "created": _ensure_utc_aware(notification.created)
+            "created": ensure_utc_aware(notification.created)
             .astimezone(pytz.timezone(config.timezone))
             .strftime("%Y-%m-%d %H:%M:%S %Z"),
         }

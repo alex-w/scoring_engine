@@ -4,6 +4,13 @@ target_round_time = 180
 agent_psk = TheCakeIsALie
 agent_show_flag_early_mins = 5
 worker_refresh_time = 30
+# How many rounds may fail back to back before the engine gives up and exits
+# non-zero.  A failed round (usually a database blip) is rolled back and
+# retried, but an error that reproduces every round is not transient: the
+# engine exits so the container restart is visible to the operator instead of
+# it silently spinning through the competition producing no rounds.
+# Set to 0 to retry forever (not recommended).
+max_consecutive_round_failures = 3
 engine_paused = False
 pause_duration = 30
 blue_team_update_hostname = True
@@ -17,6 +24,24 @@ upload_folder = /var/uploads
 check_output_folder = /var/check_outputs
 
 debug = False
+
+# Flask session signing key for the web application.
+#
+# MUST be set to a long, random value and MUST stay the same across restarts
+# and across every web process/container:
+#   * If it changes, all session cookies become invalid and every user is
+#     logged out.
+#   * If two web processes/containers hold different keys, a session created
+#     by one is rejected by the other, so you cannot run more than one web
+#     replica behind a load balancer.
+#
+# Left empty on purpose -- no default key is shipped, because a fixed default
+# would let anyone forge session cookies. If it is empty the web app still
+# starts, but generates a throwaway key and logs a warning.
+#
+# Generate one with:
+#   python -c "import secrets; print(secrets.token_hex(64))"
+secret_key =
 
 # SQLite
 db_uri = sqlite:////tmp/engine.db?check_same_thread=False
@@ -47,6 +72,13 @@ cache_type = redis
 redis_host = 127.0.0.1
 redis_port = 6379
 redis_password =
+
+# Mark the session and remember-me cookies "Secure" so the browser only ever
+# sends them over HTTPS.  Set this to True for any deployment served over TLS
+# (the bundled docker compose stack terminates TLS at nginx and already sets
+# it).  Leave it False for a plain-HTTP dev run, otherwise the browser will
+# drop the session cookie and logins will appear to do nothing.
+session_cookie_secure = False
 
 # SLA Penalty Configuration
 # Enable/disable SLA penalties (consecutive failure penalties)

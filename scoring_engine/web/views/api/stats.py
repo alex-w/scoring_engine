@@ -8,21 +8,9 @@ from flask_login import current_user, login_required
 from sqlalchemy.sql import case, func
 
 from scoring_engine.cache import cache
-
-
-def _ensure_utc_aware(dt):
-    """Ensure datetime is timezone-aware in UTC. Handles both naive and aware datetimes."""
-    if dt is None:
-        return None
-    if dt.tzinfo is None:
-        # Naive datetime - assume UTC
-        return pytz.utc.localize(dt)
-    # Already aware - convert to UTC
-    return dt.astimezone(pytz.utc)
-
-
 from scoring_engine.cache_helper import update_overview_data, update_service_data, update_services_data
 from scoring_engine.config import config
+from scoring_engine.datetime_utils import ensure_utc_aware
 from scoring_engine.db import db
 from scoring_engine.models.account import Account
 from scoring_engine.models.check import Check
@@ -108,8 +96,8 @@ def _build_response(rows):
         if round_id not in rounds:
             rounds[round_id] = {
                 "round_id": round_id,
-                "start_time": _ensure_utc_aware(round_start).astimezone(tz).strftime("%Y-%m-%d %H:%M:%S %Z"),
-                "end_time": _ensure_utc_aware(round_end).astimezone(tz).strftime("%Y-%m-%d %H:%M:%S %Z"),
+                "start_time": ensure_utc_aware(round_start).astimezone(tz).strftime("%Y-%m-%d %H:%M:%S %Z"),
+                "end_time": ensure_utc_aware(round_end).astimezone(tz).strftime("%Y-%m-%d %H:%M:%S %Z"),
                 "total_seconds": (round_end - round_start).seconds,
                 "num_up_services": 0,
                 "num_down_services": 0,
