@@ -8,7 +8,7 @@ import re
 import signal
 import sys
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 from functools import partial
 from pathlib import Path
 
@@ -27,9 +27,23 @@ from scoring_engine.models.check import Check
 from scoring_engine.models.environment import Environment
 from scoring_engine.models.kb import KB
 from scoring_engine.models.round import Round
+from scoring_engine.models.round_score import RoundScore
 from scoring_engine.models.property import Property
 from scoring_engine.models.service import Service
 from scoring_engine.models.setting import Setting
+from scoring_engine.schedule import engine_should_run
+
+
+def _utcnow():
+    """Current time as a naive UTC datetime.
+
+    The round timestamps must be UTC to match how they are stored/compared
+    everywhere else (the round model default, the display localizers, and the
+    wall-clock scoreboard freeze all assume naive UTC). Plain ``datetime.now()``
+    is the container's *local* time, which only coincides with UTC when the
+    container clock happens to be UTC.
+    """
+    return datetime.now(timezone.utc).replace(tzinfo=None)
 
 
 def engine_sigint_handler(signum, frame, engine):
@@ -343,10 +357,35 @@ class Engine(object):
                         row.id for row in self.db.session.query(Round.id).filter(Round.number == round_number).all()
                     ]
                     if round_ids:
+                        # Services touched by this round, captured before its checks
+                        # are deleted, so the consecutive-failure cache can be
+                        # repaired from the remaining history once they are gone.
+                        affected_service_ids = [
+                            row[0]
+                            for row in self.db.session.query(Check.service_id)
+                            .filter(Check.round_id.in_(round_ids))
+                            .distinct()
+                            .all()
+                        ]
                         self.db.session.query(Check).filter(Check.round_id.in_(round_ids)).delete(
                             synchronize_session=False
                         )
+                        # Materialized scores are keyed by round; they must die with
+                        # the round or the scoreboard keeps ghost points for a round
+                        # that no longer exists.
+                        self.db.session.query(RoundScore).filter(RoundScore.round_id.in_(round_ids)).delete(
+                            synchronize_session=False
+                        )
                         self.db.session.query(Round).filter(Round.id.in_(round_ids)).delete(synchronize_session=False)
+                        # The deleted round's pass/fail no longer applies; rebuild
+                        # the consecutive-failure cache for the services it touched
+                        # from the remaining checks (rare path -- a scan is fine).
+                        if affected_service_ids:
+                            from scoring_engine.scores import recompute_consecutive_failures_cache
+
+                            recompute_consecutive_failures_cache(
+                                self.db.session, service_ids=affected_service_ids, commit=False
+                            )
                     kb_removed = (
                         self.db.session.query(KB)
                         .filter(KB.round_num == round_number, KB.name == "task_ids")
@@ -411,7 +450,7 @@ class Engine(object):
         except Exception:
             # The database is probably what failed in the first place.
             target_round_time = 60
-        round_delta = target_round_time - (datetime.now() - round_start_time).seconds
+        round_delta = target_round_time - (_utcnow() - round_start_time).seconds
         # The exponent is clamped as well as the result: with the bound
         # disabled the failure count is unbounded, and 2 ** (a few thousand) is
         # an expensive way to arrive at a number we are about to throw away.
@@ -446,6 +485,18 @@ class Engine(object):
                 self.sleep(pause_duration)
                 continue
 
+            # Competition schedule: outside every configured window the engine
+            # idles rather than probing hosts that are powered down between
+            # competition days. This gates only the *next* round, so any in-flight
+            # round finishes and materializes first; the loop re-checks each cycle,
+            # so the engine resumes on its own when the next window opens. No
+            # windows configured means no schedule -- the engine always runs.
+            if not engine_should_run(_utcnow(), session=self.db.session):
+                pause_duration = int(Setting.get_setting("pause_duration").value)
+                logger.info("Outside competition window. Sleeping for {0} seconds".format(pause_duration))
+                self.sleep(pause_duration)
+                continue
+
             # Re-sync round counter from DB (handles rollback while paused or between rounds)
             db_round = Round.get_last_round_num()
             if db_round < self.current_round:
@@ -458,7 +509,7 @@ class Engine(object):
 
             self.current_round += 1
             logger.info("Running round: " + str(self.current_round))
-            round_start_time = datetime.now()
+            round_start_time = _utcnow()
             self.round_running = True
             self.rounds_run += 1
 
@@ -550,6 +601,13 @@ class Engine(object):
                 round_obj = Round(round_start=round_start_time, number=self.current_round)
                 self.db.session.add(round_obj)
                 self.db.session.commit()
+                # Capture the round's PK as a plain int now, while nothing is pending
+                # so the read is harmless. commit() above expired round_obj, and later
+                # reading any attribute off it (even the PK) reloads the row and
+                # autoflushes -- which, once checks are pending, would flush them
+                # ahead of the single round-close commit and defeat the failed-round
+                # handling. Use this int for materialization instead.
+                round_id = round_obj.id
 
                 # Pre-fetch all environments needed for result processing in one query
                 all_env_ids = list(set(task_env_map.values()))
@@ -586,6 +644,16 @@ class Engine(object):
                 # We keep track of the number of passed and failed checks per round
                 # so we can report a little bit at the end of each round
                 teams = {}
+                # Accumulate per-team service points for passing checks as we go, so
+                # the round_score rows can be written from memory in the same commit
+                # as the checks -- no extra query, and nothing that would autoflush
+                # the pending checks early.
+                round_points = {}
+                # Per-service pass/fail for this round, accumulated in memory so
+                # the consecutive-failure cache can be updated in the same commit
+                # without querying the pending checks (which would autoflush them).
+                round_pass_ids = set()  # services with >=1 passing check this round
+                round_fail_counts = {}  # service id -> count of failing checks this round
                 processed_count = 0
                 for team_name, team_task_ids in task_ids.items():
                     for task_id in team_task_ids:
@@ -652,8 +720,13 @@ class Engine(object):
                             }
                         if result:
                             teams[environment.service.team.name]["Success"].append(environment.service.name)
+                            team_id = environment.service.team_id
+                            round_points[team_id] = round_points.get(team_id, 0) + environment.service.points
+                            round_pass_ids.add(environment.service.id)
                         else:
                             teams[environment.service.team.name]["Failed"].append(environment.service.name)
+                            sid = environment.service.id
+                            round_fail_counts[sid] = round_fail_counts.get(sid, 0) + 1
 
                         check = Check(service=environment.service, round=round_obj)
 
@@ -673,10 +746,41 @@ class Engine(object):
                         )
                         self.db.session.add(check)
                 logger.info("Processed %d check results, committing to database", total_tasks)
-                round_end_time = datetime.now()
+                round_end_time = _utcnow()
                 round_obj.round_end = round_end_time
+
+                # Materialize per-team score facts from the sums accumulated above,
+                # staged into the SAME commit as the round's checks so a round and
+                # its scores become visible atomically. Passing the precomputed
+                # points (and clear_existing=False, since a fresh round has no prior
+                # rows) means no query runs here -- nothing autoflushes the pending
+                # checks ahead of this single commit.
+                from scoring_engine.scores import materialize_round
+
+                # Use the round_id/current_round ints captured earlier -- reading an
+                # attribute off the (expired) round_obj here would autoflush the
+                # pending checks ahead of this single commit.
+                rows_written = materialize_round(
+                    self.db.session,
+                    round_id,
+                    self.current_round,
+                    points_by_team=round_points,
+                    clear_existing=False,
+                    commit=False,
+                )
+
+                # Fold this round's pass/fail into the materialized consecutive-
+                # failure cache in the SAME commit. no_autoflush keeps the pending
+                # checks from flushing early; the in-memory result sets mean no
+                # checks query runs here. A round that rolls back before the commit
+                # reverts these updates for free (they were never committed).
+                from scoring_engine.scores import apply_consecutive_failures
+
+                with self.db.session.no_autoflush:
+                    apply_consecutive_failures(self.db.session, round_pass_ids, round_fail_counts)
+
                 self.db.session.commit()
-                logger.info("Database commit complete")
+                logger.info("Database commit complete; materialized round scores for %d team(s)", rows_written)
 
             except Exception as e:
                 # Something blew up part way through the round (most often a
@@ -746,7 +850,7 @@ class Engine(object):
 
             if not self.is_last_round():
                 target_round_time = int(Setting.get_setting("target_round_time").value)
-                round_duration = (datetime.now() - round_start_time).seconds
+                round_duration = (_utcnow() - round_start_time).seconds
                 round_delta = target_round_time - round_duration
                 if round_delta > 0:
                     logger.info(

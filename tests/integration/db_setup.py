@@ -113,3 +113,13 @@ def ensure_integration_data() -> None:
         _seed_team(team_index, rounds)
 
     db.session.commit()
+
+    # The scoreboard/current_score read team totals from the materialized
+    # round_score table (and SLA penalties from the consecutive-failure cache),
+    # which the engine writes at round close. This dataset is seeded statically
+    # without the engine, so materialize both here -- otherwise current_score
+    # reads zero even though the checks exist.
+    from scoring_engine.scores import materialize_all_rounds, recompute_consecutive_failures_cache
+
+    materialize_all_rounds(db.session)
+    recompute_consecutive_failures_cache(db.session)

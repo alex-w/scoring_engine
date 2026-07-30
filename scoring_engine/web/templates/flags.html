@@ -8,6 +8,20 @@
 {% endblock %}
 {% block content %}
 <div class="page-wrap">
+    <h3 class="section-header">Red Team Flag Score</h3>
+    <div class="chart-card" style="padding:1rem 1.25rem; overflow:hidden;">
+        <div class="stat-value" id="red-flag-total" style="font-size:2rem; font-weight:600;">-</div>
+        <p class="text-muted" id="red-flag-values" style="margin-bottom:1rem;"></p>
+        <table id="flag-score" class="table table-striped table-bordered table-sm" cellspacing="0" width="100%">
+            <thead>
+                <tr>
+                    <th>Team</th>
+                    <th>Points Conceded</th>
+                </tr>
+            </thead>
+        </table>
+    </div>
+
     <h3 class="section-header">Active Flags</h3>
     <div class="chart-card" style="padding:1rem 1.25rem; overflow:hidden;">
         <table id="flags" class="table table-striped table-bordered table-sm" cellspacing="0" width="100%">
@@ -54,6 +68,24 @@
 </div>
 <script>
 $(document).ready(function() {
+  // Red team flag score (config-driven; total plus per-blue-team breakdown)
+  $('#flag-score').DataTable({
+    ajax: '/api/flags/score',
+    order: [[1, 'desc']],
+    columns: [
+      { data: 'team', render: ScoringEngineUtils.dtEscape() },
+      { data: 'points' }
+    ],
+  });
+  $.ajax({
+    url: '/api/flags/score',
+    success: function(response) {
+      ScoringEngineUtils.setText(document.getElementById('red-flag-total'), response.red_total);
+      document.getElementById('red-flag-values').textContent =
+        'user flag: ' + response.points.user + ' pts, root flag: ' + response.points.root + ' pts';
+    }
+  });
+
   $('#flags').DataTable( {
       ajax: '/api/flags',
       order: [[1, 'asc']],

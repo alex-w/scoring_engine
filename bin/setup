@@ -15,6 +15,7 @@ from scoring_engine.models.inject import Inject, InjectRubricScore, RubricItem, 
 from scoring_engine.models.notifications import Notification
 from scoring_engine.models.round import Round
 from scoring_engine.models.service import Service
+from scoring_engine.scores import materialize_all_rounds, recompute_consecutive_failures_cache
 from scoring_engine.models.setting import Setting
 from scoring_engine.models.team import Team
 from scoring_engine.models.announcement import Announcement
@@ -29,8 +30,9 @@ from scoring_engine.web import (
 parser = optparse.OptionParser()
 parser.add_option("--overwrite-db", action="store_true", default=False)
 parser.add_option("--example", action="store_true", default=False)
-parser.add_option("--announcements", type="int", default=8,
-                  help="Number of sample announcements to generate (default: 8)")
+parser.add_option(
+    "--announcements", type="int", default=8, help="Number of sample announcements to generate (default: 8)"
+)
 
 options, arguments = parser.parse_args()
 
@@ -199,19 +201,33 @@ with app.app_context():
     # Welcome Page Configuration
     logger.info("Creating the Welcome Page Configuration")
     import json
+
     welcome_config = {
         "welcome_message": "<h2 class='text-center'>Welcome to the Competition!</h2><p class='text-center lead'>Good luck to all teams. Check back here for updates and sponsor information.</p>",
         "sponsor_tiers": [
             {"name": "Diamond", "display_order": 1, "sponsors": []},
             {"name": "Platinum", "display_order": 2, "sponsors": []},
             {"name": "Gold", "display_order": 3, "sponsors": []},
-        ]
+        ],
     }
     db.session.add(Setting(name="welcome_config", value=json.dumps(welcome_config)))
 
     # Inject Settings
     logger.info("Creating the Inject Settings")
     db.session.add(Setting(name="inject_scores_visible", value=config.inject_scores_visible))
+
+    # Red-team flag scoring (flat points per captured flag by permission level)
+    db.session.add(Setting(name="flag_points_user", value=str(config.flag_points_user)))
+    db.session.add(Setting(name="flag_points_root", value=str(config.flag_points_root)))
+
+    # Weighted scoring (rebalance service/inject/flag contributions to the total)
+    db.session.add(Setting(name="weighted_scoring_enabled", value=config.weighted_scoring_enabled))
+    db.session.add(Setting(name="service_weight", value=str(config.service_weight)))
+    db.session.add(Setting(name="inject_weight", value=str(config.inject_weight)))
+    db.session.add(Setting(name="flag_weight", value=str(config.flag_weight)))
+
+    # Wall-clock scoreboard freeze (empty = not frozen; set at runtime by white team)
+    db.session.add(Setting(name="scoreboard_freeze_time", value=""))
 
     db.session.commit()
 
@@ -262,6 +278,20 @@ with app.app_context():
                 check.finished(result, reason, output, command)
                 db.session.add(check)
         db.session.commit()
+
+        # Materialize round_score for the simulated rounds. In production the
+        # engine writes these rows as each round closes, but example data is
+        # loaded statically without ever running the engine, and a fresh install
+        # stamps Alembic to head rather than running the 005 backfill -- so
+        # without this the round_score-backed scoreboard/overview read zero for
+        # every team even though the checks exist.
+        logger.info("Materializing round scores for the simulated rounds")
+        materialize_all_rounds(db.session)
+
+        # Same reasoning for the SLA consecutive-failure cache the batched penalty
+        # read uses: the engine would maintain it, but example data skips it.
+        logger.info("Materializing SLA consecutive-failure cache")
+        recompute_consecutive_failures_cache(db.session)
 
         # Simulate Injects
         num_injects = randint(5, 15)
@@ -413,25 +443,29 @@ with app.app_context():
         ]
         # Add a team-specific announcement if there are blue teams
         if len(blue_team_ids) >= 2:
-            sample_announcements.append({
-                "title": "DNS Issue Resolved",
-                "content": (
-                    "<p>The DNS resolution issue affecting your team has been resolved. "
-                    "Please verify your DNS service is passing checks.</p>"
-                ),
-                "audience": f"team:{blue_team_ids[0]}",
-                "is_pinned": False,
-            })
-            sample_announcements.append({
-                "title": "Scoring Adjustment",
-                "content": (
-                    "<p>A scoring adjustment has been applied to your teams due to "
-                    "the infrastructure issue earlier. Two failed checks have been "
-                    "marked as passing.</p>"
-                ),
-                "audience": f"teams:{blue_team_ids[0]},{blue_team_ids[1]}",
-                "is_pinned": False,
-            })
+            sample_announcements.append(
+                {
+                    "title": "DNS Issue Resolved",
+                    "content": (
+                        "<p>The DNS resolution issue affecting your team has been resolved. "
+                        "Please verify your DNS service is passing checks.</p>"
+                    ),
+                    "audience": f"team:{blue_team_ids[0]}",
+                    "is_pinned": False,
+                }
+            )
+            sample_announcements.append(
+                {
+                    "title": "Scoring Adjustment",
+                    "content": (
+                        "<p>A scoring adjustment has been applied to your teams due to "
+                        "the infrastructure issue earlier. Two failed checks have been "
+                        "marked as passing.</p>"
+                    ),
+                    "audience": f"teams:{blue_team_ids[0]},{blue_team_ids[1]}",
+                    "is_pinned": False,
+                }
+            )
 
         # Slice to requested count, or cycle if more requested than available
         num_announcements = options.announcements
@@ -440,7 +474,9 @@ with app.app_context():
         else:
             selected_announcements = list(sample_announcements)
             while len(selected_announcements) < num_announcements:
-                selected_announcements.append(sample_announcements[len(selected_announcements) % len(sample_announcements)])
+                selected_announcements.append(
+                    sample_announcements[len(selected_announcements) % len(sample_announcements)]
+                )
 
         for ann_data in selected_announcements:
             announcement = Announcement(

@@ -226,3 +226,44 @@ def api_flags_totals():
         data.append({"team": team[0], "win_score": team[1], "nix_score": team[2], "total_score": team[1] + team[2]})
 
     return jsonify(data=data)
+
+
+@mod.route("/api/flags/score")
+@login_required
+@cache.cached(make_cache_key=make_cache_key)
+def api_flags_score():
+    """Red-team flag score: the total the red team has earned by compromising blue
+    hosts, plus a per-blue-team breakdown (that team's captured-flag value).
+
+    Config-driven (flag_points_user / flag_points_root). Per the "add to red only"
+    rule, these points accrue to the red team; blue scores are unaffected. Visible
+    to red and white teams only.
+    """
+    if not current_user.is_red_team and not current_user.is_white_team:
+        return jsonify({"status": "Unauthorized"}), 403
+
+    from scoring_engine.scores import flag_points_by_team, get_flag_point_values
+    from scoring_engine.sla import get_sla_config
+
+    from . import get_effective_freeze
+
+    _, freeze_time = get_effective_freeze()
+    user_points, root_points = get_flag_point_values()
+    by_team_id = flag_points_by_team(db.session, user_points, root_points, freeze_time=freeze_time)
+
+    blue_teams = db.session.query(Team).filter(Team.color == "Blue").order_by(Team.id).all()
+    by_team = [{"team": team.name, "points": by_team_id.get(team.id, 0)} for team in blue_teams]
+
+    # Weighted scoring can scale the red team's flag total. Flags accrue to red
+    # only, so unlike the blue scoreboard there is nothing to rebalance flags
+    # against -- flag_weight simply scales the red flag magnitude.
+    red_total = sum(by_team_id.values())
+    sla_config = get_sla_config()
+    if sla_config.weighted_scoring_enabled:
+        red_total = int(round(red_total * sla_config.flag_weight))
+
+    return jsonify(
+        red_total=red_total,
+        by_team=by_team,
+        points={"user": user_points, "root": root_points},
+    )

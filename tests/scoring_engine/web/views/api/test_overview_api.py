@@ -71,6 +71,12 @@ class TestOverviewAPI:
             check = Check(service=svc, round=round_obj, result=result, output="", completed=True)
             db.session.add(check)
         db.session.commit()
+        from scoring_engine.scores import materialize_round, recompute_consecutive_failures_cache
+
+        materialize_round(db.session, round_obj.id, round_number)
+        # team_penalties reads the materialized SLA cache; the engine maintains it
+        # in production, so populate it here from the checks these tests built.
+        recompute_consecutive_failures_cache(db.session)
         return round_obj
 
     # --- get_anonymize_mode (via /api/overview/get_columns endpoint) ---
@@ -230,7 +236,8 @@ class TestOverviewAPI:
         assert len(rows) >= 3
         assert rows[0][0] == "Current Score"
         assert rows[1][0] == "Current Place"
-        assert rows[2][0] == "Up/Down Ratio"
+        assert rows[2][0] == "Services Up"
+        assert rows[3][0] == "Services Down"
 
     def test_get_data_with_checks_and_scores(self):
         svc1 = Service(name="SSH", check_name="SSHCheck", host="10.0.0.1", port=22, team=self.blue_team, points=100)
@@ -256,11 +263,15 @@ class TestOverviewAPI:
         assert places_row[0] == "Current Place"
         assert places_row[1] == "1"
 
-        # Up/Down Ratio row - structured counts, no markup
-        ratio_row = rows[2]
-        assert ratio_row[0] == "Up/Down Ratio"
-        assert ratio_row[1] == {"up": 1, "down": 0}
-        assert ratio_row[2] == {"up": 0, "down": 1}
+        # Services Up / Services Down rows - plain integer counts, no markup
+        up_row = rows[2]
+        assert up_row[0] == "Services Up"
+        assert up_row[1] == 1
+        assert up_row[2] == 0
+        down_row = rows[3]
+        assert down_row[0] == "Services Down"
+        assert down_row[1] == 0
+        assert down_row[2] == 1
 
         # Service row (SSH)
         assert any(row[0] == "SSH" for row in rows)
@@ -288,7 +299,8 @@ class TestOverviewAPI:
         assert "Current Score" in row_labels
         assert "Current Place" in row_labels
         assert "SLA Penalties" in row_labels
-        assert "Up/Down Ratio" in row_labels
+        assert "Services Up" in row_labels
+        assert "Services Down" in row_labels
 
     def test_get_data_with_sla_penalties_shown(self):
         """Test that SLA penalties appear when a team exceeds the failure threshold."""
@@ -479,17 +491,18 @@ class TestOverviewAPI:
         assert "service_ids" in resp.json
         assert len(resp.json["service_ids"]) == 2
 
-    def test_get_data_up_down_ratio_is_structured(self):
-        """Up/Down Ratio cells are {"up": int, "down": int} objects."""
+    def test_get_data_up_down_are_separate_integer_rows(self):
+        """Services Up / Services Down are separate rows of plain integer counts."""
         self._setup_penalty_scenario()
 
         resp = self.client.get("/api/overview/get_data")
         rows = resp.json["data"]
-        ratio_row = next(row for row in rows if row[0] == "Up/Down Ratio")
+        up_row = next(row for row in rows if row[0] == "Services Up")
+        down_row = next(row for row in rows if row[0] == "Services Down")
 
         # blue_team: HTTP up, SSH down. blue_team2: SSH up, nothing down.
-        assert ratio_row[1] == {"up": 1, "down": 1}
-        assert ratio_row[2] == {"up": 1, "down": 0}
+        assert up_row[1] == 1 and down_row[1] == 1
+        assert up_row[2] == 1 and down_row[2] == 0
 
     def test_get_data_sla_penalties_are_numeric(self):
         """SLA Penalties cells are plain numbers (magnitude), not formatted strings."""

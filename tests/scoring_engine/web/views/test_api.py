@@ -13,6 +13,7 @@ from scoring_engine.models.service import Service
 from scoring_engine.models.setting import Setting
 from scoring_engine.models.team import Team
 from scoring_engine.models.user import User
+from scoring_engine.scores import materialize_all_rounds, recompute_consecutive_failures_cache
 from scoring_engine.web.views.api.service import is_valid_user_input
 
 
@@ -438,6 +439,9 @@ class TestAPI:
             db.session.add(check)
         db.session.commit()
 
+        materialize_all_rounds(db.session)
+
+        recompute_consecutive_failures_cache(db.session)
         resp = self.client.get("/api/scoreboard/get_bar_data")
         assert resp.status_code == 200
         data = resp.json
@@ -519,6 +523,7 @@ class TestAPI:
             )
             db.session.add_all([check1, check2, check3])
         db.session.commit()
+        recompute_consecutive_failures_cache(db.session)
 
         resp = self.client.get("/api/scoreboard/get_bar_data")
         assert resp.status_code == 200
@@ -748,6 +753,9 @@ class TestAPI:
             db.session.add(check)
         db.session.commit()
 
+        materialize_all_rounds(db.session)
+
+        recompute_consecutive_failures_cache(db.session)
         resp = self.client.get("/api/scoreboard/get_bar_data")
         assert resp.status_code == 200
         data = resp.json
@@ -795,6 +803,9 @@ class TestAPI:
             db.session.add(check)
         db.session.commit()
 
+        materialize_all_rounds(db.session)
+
+        recompute_consecutive_failures_cache(db.session)
         resp = self.client.get("/api/scoreboard/get_bar_data")
         assert resp.status_code == 200
         data = resp.json
@@ -834,6 +845,9 @@ class TestAPI:
             db.session.add(check)
         db.session.commit()
 
+        materialize_all_rounds(db.session)
+
+        recompute_consecutive_failures_cache(db.session)
         resp = self.client.get("/api/scoreboard/get_bar_data")
         assert resp.status_code == 200
         data = resp.json
@@ -878,6 +892,9 @@ class TestAPI:
             db.session.add(check)
         db.session.commit()
 
+        materialize_all_rounds(db.session)
+
+        recompute_consecutive_failures_cache(db.session)
         resp = self.client.get("/api/overview/get_data")
         assert resp.status_code == 200
         data = resp.json
@@ -1101,6 +1118,9 @@ class TestAPI:
             db.session.add(check)
         db.session.commit()
 
+        materialize_all_rounds(db.session)
+
+        recompute_consecutive_failures_cache(db.session)
         resp = self.client.get("/api/scoreboard/get_bar_data")
         assert resp.status_code == 200
         data = resp.json
@@ -1178,6 +1198,9 @@ class TestAPI:
             db.session.add(check)
         db.session.commit()
 
+        materialize_all_rounds(db.session)
+
+        recompute_consecutive_failures_cache(db.session)
         resp = self.client.get("/api/scoreboard/get_bar_data")
         assert resp.status_code == 200
         data = resp.json
@@ -1441,22 +1464,24 @@ class TestAPI:
         assert resp.status_code == 200
         data = resp.json
 
-        # Find Up/Down Ratio row
-        ratio_row = None
+        # Find the Services Up / Services Down rows
+        up_row = None
+        down_row = None
         for row in data["data"]:
-            if row[0] == "Up/Down Ratio":
-                ratio_row = row
-                break
+            if row[0] == "Services Up":
+                up_row = row
+            elif row[0] == "Services Down":
+                down_row = row
 
-        assert ratio_row is not None, "Up/Down Ratio row not found"
+        assert up_row is not None, "Services Up row not found"
+        assert down_row is not None, "Services Down row not found"
 
         # Find team 2's index (teams ordered by id)
         team2_idx = 2 if team1.id < team2.id else 1
 
-        # The ratio cell should show 2 up / 1 down for team 2 in round 3
-        # Format: {"up": 2, "down": 1}
-        team_ratio = ratio_row[team2_idx]
-        assert team_ratio == {"up": 2, "down": 1}, f"Expected 2 up / 1 down for team 2, got: {team_ratio}"
+        # Team 2 in round 3 should show 2 up, 1 down
+        assert up_row[team2_idx] == 2, f"Expected 2 up for team 2, got: {up_row[team2_idx]}"
+        assert down_row[team2_idx] == 1, f"Expected 1 down for team 2, got: {down_row[team2_idx]}"
 
     def test_overview_get_data_multiple_teams_all_services_correct(self):
         """Comprehensive test: multiple teams, multiple services, ID divergence.

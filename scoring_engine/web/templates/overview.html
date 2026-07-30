@@ -43,7 +43,7 @@
 
     <!-- Service Status Matrix -->
     <h3 class="section-header">Service Status</h3>
-    <div class="chart-card animate-in" style="padding:0; overflow:hidden; animation-delay:200ms;">
+    <div class="chart-card animate-in" style="padding:0; overflow-x:auto; animation-delay:200ms;">
         <table id="overview" class="table table-sm overview-matrix">
             <thead>
                 <tr id="overview-header">
@@ -97,13 +97,17 @@
             return '<td>' + value + medal + '</td>';
         }
 
-        if (rowLabel === 'Up/Down Ratio') {
-            var up = (value && value.up) || 0;
-            var down = (value && value.down) || 0;
-            return '<td>'
-                + '<span class="text-success">' + up + ' <i class="bi bi-arrow-up"></i></span> / '
-                + '<span class="text-danger">' + down + ' <i class="bi bi-arrow-down"></i></span>'
-                + '</td>';
+        if (rowLabel === 'Services Up') {
+            var up = parseInt(value) || 0;
+            return '<td><span class="text-success">' + up + ' <i class="bi bi-arrow-up"></i></span></td>';
+        }
+
+        if (rowLabel === 'Services Down') {
+            var down = parseInt(value) || 0;
+            if (down > 0) {
+                return '<td><span class="text-danger">' + down + ' <i class="bi bi-arrow-down"></i></span></td>';
+            }
+            return '<td><span class="text-muted">0</span></td>';
         }
 
         if (rowLabel === 'SLA Penalties') {
@@ -146,7 +150,7 @@
             var rows = json.data || [];
             _serviceIds = json.service_ids || null;
             var html = '';
-            var metaRows = ['Current Score', 'Current Place', 'SLA Penalties', 'Up/Down Ratio'];
+            var metaRows = ['Current Score', 'Current Place', 'SLA Penalties', 'Services Up', 'Services Down'];
             var serviceRowIndex = 0;
 
             for (var r = 0; r < rows.length; r++) {
