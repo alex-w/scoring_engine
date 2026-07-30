@@ -122,6 +122,34 @@ class TestInjectsAPI:
         assert zf.namelist() == ["Blue_Team_1/Recon_Report/report.pdf"]
         assert zf.read("Blue_Team_1/Recon_Report/report.pdf") == b"PDF-CONTENT"
 
+    def test_admin_ungraded_skips_orphaned_injects(self):
+        # A submission whose team no longer exists (team is None) must be skipped,
+        # not 500 the whole list.
+        self._inject_with_status(self.blue_team1, "Real", "Submitted")
+        orphan = self._inject_with_status(self.blue_team1, "Orphan", "Submitted")
+        orphan.team = None
+        db.session.commit()
+
+        self.login("whiteuser")
+        resp = self.client.get("/api/admin/injects/ungraded")
+        assert resp.status_code == 200
+        assert [d["title"] for d in resp.get_json()["data"]] == ["Real"]
+
+    def test_admin_download_ungraded_skips_orphaned_injects(self, tmp_path, monkeypatch):
+        from scoring_engine.web.views.api import admin as admin_module
+
+        monkeypatch.setattr(admin_module.config, "upload_folder", str(tmp_path))
+
+        orphan = self._inject_with_status(self.blue_team1, "Orphan", "Submitted")
+        db.session.add(InjectFile("stored.pdf", self.blue_user1, orphan, original_filename="o.pdf"))
+        orphan.team = None
+        db.session.commit()
+
+        self.login("whiteuser")
+        resp = self.client.get("/api/admin/injects/download_ungraded")
+        # The only submission is orphaned and skipped, so nothing to bundle -> 404, not 500.
+        assert resp.status_code == 404
+
     # Authorization Tests
     def test_api_injects_requires_auth(self):
         """Test that /api/injects requires authentication"""
