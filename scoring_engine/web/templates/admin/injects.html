@@ -31,6 +31,22 @@
   </div>
 </div>
 
+<h3 class="section-header">Grading Queue</h3>
+<div class="chart-card" style="padding:0; overflow:hidden;">
+  <div class="d-flex justify-content-between align-items-center p-2">
+    <span class="text-muted" id="ungraded-count">Loading&hellip;</span>
+    <button id="download-ungraded" class="btn btn-sm btn-primary" type="button" disabled>
+      <i class="bi bi-download"></i> Download all as ZIP
+    </button>
+  </div>
+  <table class="table table-sm overview-matrix mb-0" id="ungradedTable" width="100%">
+    <thead>
+      <tr><th>Team</th><th>Inject</th><th>Status</th><th>Files</th><th></th></tr>
+    </thead>
+    <tbody id="ungradedBody"></tbody>
+  </table>
+</div>
+
 <h3 class="section-header">Inject Scores</h3>
 <div class="chart-card">
   <div id="teamBar" style="width: 100%; height:300px;"></div>
@@ -245,6 +261,57 @@
       ]
     });
   });
+  });
+</script>
+<script>
+  // Grading queue: a flat, cross-team list of submissions awaiting grading,
+  // plus a one-click bulk download of every ungraded file for offline grading.
+  $(document).ready(function () {
+    function esc(s) { return $('<div>').text(s == null ? '' : s).html(); }
+
+    function loadUngraded() {
+      $.getJSON('/api/admin/injects/ungraded', function (result) {
+        var rows = (result && result.data) || [];
+        $('#ungraded-count').text(
+          rows.length === 0 ? 'Nothing awaiting grading.' : rows.length + ' submission(s) awaiting grading'
+        );
+        $('#ungradedBody').html(rows.map(function (r) {
+          return '<tr>'
+            + '<td>' + esc(r.team) + '</td>'
+            + '<td>' + esc(r.title) + '</td>'
+            + '<td><span class="badge bg-warning text-dark">' + esc(r.status) + '</span></td>'
+            + '<td>' + esc(r.file_count) + '</td>'
+            + '<td><a class="btn btn-sm btn-outline-secondary" href="/admin/injects/' + encodeURIComponent(r.inject_id) + '">Grade</a></td>'
+            + '</tr>';
+        }).join(''));
+        $('#download-ungraded').prop('disabled', rows.length === 0);
+      });
+    }
+
+    loadUngraded();
+    if (window.ScoringEngineSSE) {
+      ScoringEngineSSE.on('inject_update', loadUngraded);
+    }
+
+    $('#download-ungraded').on('click', function () {
+      fetch('/api/admin/injects/download_ungraded')
+        .then(function (resp) {
+          if (resp.status === 404) { return null; }
+          if (!resp.ok) { throw new Error('Download failed'); }
+          return resp.blob();
+        })
+        .then(function (blob) {
+          if (!blob) { return; }
+          var url = URL.createObjectURL(blob);
+          var a = document.createElement('a');
+          a.href = url;
+          a.download = 'ungraded_submissions.zip';
+          document.body.appendChild(a);
+          a.click();
+          a.remove();
+          URL.revokeObjectURL(url);
+        });
+    });
   });
 </script>
 {% endblock %}
