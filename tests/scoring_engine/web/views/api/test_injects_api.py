@@ -53,6 +53,75 @@ class TestInjectsAPI:
         defaults.update(kwargs)
         return Template(**defaults)
 
+    # --- Admin ungraded-submissions endpoints (#1157) -----------------------
+    def _inject_with_status(self, team, title, status):
+        template = self._make_template(title=title)
+        inject = Inject(team=team, template=template)
+        inject.status = status
+        db.session.add_all([template, inject])
+        db.session.commit()
+        return inject
+
+    def test_admin_ungraded_requires_white_team(self):
+        self.login("blueuser1")
+        resp = self.client.get("/api/admin/injects/ungraded")
+        assert resp.status_code == 403
+        assert resp.get_json() == {"status": "Unauthorized"}
+
+    def test_admin_ungraded_lists_only_submitted_and_resubmitted_sorted(self):
+        self._inject_with_status(self.blue_team1, "Bravo", "Submitted")
+        self._inject_with_status(self.blue_team2, "Alpha", "Resubmitted")
+        # Graded / Draft submissions must not appear.
+        self._inject_with_status(self.blue_team1, "Already graded", "Graded")
+        self._inject_with_status(self.blue_team1, "Still a draft", "Draft")
+
+        self.login("whiteuser")
+        resp = self.client.get("/api/admin/injects/ungraded")
+        assert resp.status_code == 200
+        rows = [(d["team"], d["title"], d["status"]) for d in resp.get_json()["data"]]
+        # Sorted by team then title; only the two awaiting grading.
+        assert rows == [
+            ("Blue Team 1", "Bravo", "Submitted"),
+            ("Blue Team 2", "Alpha", "Resubmitted"),
+        ]
+
+    def test_admin_download_ungraded_requires_white_team(self):
+        self.login("blueuser1")
+        resp = self.client.get("/api/admin/injects/download_ungraded")
+        assert resp.status_code == 403
+        assert resp.get_json() == {"status": "Unauthorized"}
+
+    def test_admin_download_ungraded_404_when_nothing_pending(self):
+        self.login("whiteuser")
+        resp = self.client.get("/api/admin/injects/download_ungraded")
+        assert resp.status_code == 404
+
+    def test_admin_download_ungraded_returns_zip(self, tmp_path, monkeypatch):
+        import zipfile
+
+        from scoring_engine.web.views.api import admin as admin_module
+
+        monkeypatch.setattr(admin_module.config, "upload_folder", str(tmp_path))
+
+        inject = self._inject_with_status(self.blue_team1, "Recon Report", "Submitted")
+        stored = f"Inject{inject.id}_blue_abcd1234_report.pdf"
+        db.session.add(InjectFile(stored, self.blue_user1, inject, original_filename="report.pdf"))
+        db.session.commit()
+
+        # Write the actual file where the endpoint expects it: <folder>/<inject id>/<team name>/<stored>.
+        dest = tmp_path / str(inject.id) / self.blue_team1.name
+        dest.mkdir(parents=True)
+        (dest / stored).write_bytes(b"PDF-CONTENT")
+
+        self.login("whiteuser")
+        resp = self.client.get("/api/admin/injects/download_ungraded")
+        assert resp.status_code == 200
+        assert resp.mimetype == "application/zip"
+
+        zf = zipfile.ZipFile(io.BytesIO(resp.data))
+        assert zf.namelist() == ["Blue_Team_1/Recon_Report/report.pdf"]
+        assert zf.read("Blue_Team_1/Recon_Report/report.pdf") == b"PDF-CONTENT"
+
     # Authorization Tests
     def test_api_injects_requires_auth(self):
         """Test that /api/injects requires authentication"""

@@ -1,17 +1,20 @@
 import html
+import io
 import json
 import os
 import re
 import time
+import zipfile
 from datetime import datetime, timezone
 
 import pytz
 from dateutil.parser import parse
-from flask import flash, jsonify, redirect, request, url_for
+from flask import flash, jsonify, redirect, request, send_file, url_for
 from flask_login import current_user, login_required
 from sqlalchemy.orm import joinedload
 from sqlalchemy.orm.exc import NoResultFound
 from sqlalchemy.sql import func
+from werkzeug.utils import secure_filename
 
 from scoring_engine.cache_helper import (
     update_all_cache,
@@ -1079,6 +1082,92 @@ def admin_update_template():
                     return jsonify({"status": "Updated Property Information"})
             return jsonify({"error": "Template Not Found"})
     return jsonify({"error": "Incorrect permissions"})
+
+
+@mod.route("/api/admin/injects/ungraded")
+@login_required
+def admin_get_ungraded_injects():
+    """Flat, cross-team list of inject submissions awaiting grading. White team only.
+
+    "Awaiting grading" means status Submitted or Resubmitted (the per-template
+    submissions endpoint only shows one template at a time). Sorted by team then
+    title for a stable grading order.
+    """
+    if not current_user.is_white_team:
+        return {"status": "Unauthorized"}, 403
+
+    injects = (
+        db.session.query(Inject)
+        .options(joinedload(Inject.template), joinedload(Inject.team), joinedload(Inject.files))
+        .filter(Inject.status.in_(("Submitted", "Resubmitted")))
+        .all()
+    )
+    data = [
+        {
+            "inject_id": inject.id,
+            "team": inject.team.name,
+            "title": inject.template.title,
+            "status": inject.status,
+            "file_count": len(inject.files),
+        }
+        for inject in injects
+    ]
+    data.sort(key=lambda d: (d["team"].lower(), d["title"].lower()))
+    return jsonify(data=data)
+
+
+@mod.route("/api/admin/injects/download_ungraded")
+@login_required
+def admin_download_ungraded_injects():
+    """Bundle every ungraded submission's files into one ZIP for offline grading.
+
+    Files are laid out as ``<team>/<inject title>/<original name>`` so a grader can
+    tell submissions apart at a glance; collisions inside a folder get a numeric
+    suffix. White team only. 404 when nothing is awaiting grading (empty ZIP is
+    not useful and would look like a success).
+    """
+    if not current_user.is_white_team:
+        return {"status": "Unauthorized"}, 403
+
+    injects = (
+        db.session.query(Inject)
+        .options(joinedload(Inject.template), joinedload(Inject.team), joinedload(Inject.files))
+        .filter(Inject.status.in_(("Submitted", "Resubmitted")))
+        .all()
+    )
+
+    zip_buffer = io.BytesIO()
+    files_added = 0
+    with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zip_file:
+        for inject in injects:
+            team_dir = secure_filename(inject.team.name) or f"team_{inject.team_id}"
+            inject_dir = secure_filename(inject.template.title) or f"inject_{inject.id}"
+            for f in inject.files:
+                # Files are stored under upload_folder/<inject id>/<team name>/<stored name>;
+                # see api_injects_file_upload.
+                src = os.path.join(config.upload_folder, str(inject.id), inject.team.name, f.filename)
+                if not os.path.exists(src):
+                    continue
+                display = secure_filename(f.original_filename or f.filename) or f.filename
+                arcname = f"{team_dir}/{inject_dir}/{display}"
+                candidate, counter = arcname, 1
+                while candidate in zip_file.namelist():
+                    root, ext = os.path.splitext(arcname)
+                    candidate = f"{root}_{counter}{ext}"
+                    counter += 1
+                zip_file.write(src, candidate)
+                files_added += 1
+
+    if files_added == 0:
+        return jsonify({"error": "No ungraded submission files found"}), 404
+
+    zip_buffer.seek(0)
+    return send_file(
+        zip_buffer,
+        mimetype="application/zip",
+        as_attachment=True,
+        download_name="ungraded_submissions.zip",
+    )
 
 
 @mod.route("/api/admin/get_teams")
