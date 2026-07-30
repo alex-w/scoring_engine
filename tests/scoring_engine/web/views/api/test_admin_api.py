@@ -23,6 +23,7 @@ ADMIN_API_AUTH_PATHS = [
     pytest.param("get", "/api/admin/get_teams", id="get_teams"),
     pytest.param("post", "/api/admin/toggle_engine", id="toggle_engine"),
     pytest.param("get", "/api/admin/get_engine_paused", id="get_engine_paused"),
+    pytest.param("get", "/api/admin/get_hosts", id="get_hosts"),
 ]
 
 
@@ -56,6 +57,28 @@ class TestAdminAPI:
         resp = getattr(self.client, method)(path)
         assert resp.status_code == 302
         assert "/login?" in resp.location
+
+    def test_admin_get_hosts_requires_white_team(self):
+        """Only the white team may list hosts; blue/red get 403."""
+        self.login("blueuser")
+        resp = self.client.get("/api/admin/get_hosts")
+        assert resp.status_code == 403
+        assert resp.get_json() == {"status": "Unauthorized"}
+
+    def test_admin_get_hosts_returns_distinct_sorted_hosts(self):
+        """Hosts are deduplicated across teams and sorted ascending."""
+        db.session.add_all(
+            [
+                Service(name="Web", check_name="HTTPCheck", host="host-b", port=80, team=self.blue_team),
+                Service(name="DNS", check_name="DNSCheck", host="host-a", port=53, team=self.blue_team),
+                Service(name="SSH", check_name="SSHCheck", host="host-a", port=22, team=self.red_team),
+            ]
+        )
+        db.session.commit()
+        self.login("whiteuser")
+        resp = self.client.get("/api/admin/get_hosts")
+        assert resp.status_code == 200
+        assert resp.get_json() == {"data": [{"host": "host-a"}, {"host": "host-b"}]}
 
     def test_admin_update_environment_requires_white_team(self):
         """Test that only white team can update environment"""
