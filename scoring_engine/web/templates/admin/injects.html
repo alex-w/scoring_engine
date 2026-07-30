@@ -294,7 +294,9 @@
     }
 
     $('#download-ungraded').on('click', function () {
-      fetch('/api/admin/injects/download_ungraded')
+      // csrf-safe: read-only GET download (the jQuery $(document).ajaxSend CSRF
+      // hook does not cover native fetch(), and a GET needs no token anyway).
+      fetch('/api/admin/injects/download_ungraded', { method: 'GET' })
         .then(function (resp) {
           if (resp.status === 404) { return null; }
           if (!resp.ok) { throw new Error('Download failed'); }
