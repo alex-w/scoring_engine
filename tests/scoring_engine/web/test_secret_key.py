@@ -22,6 +22,27 @@ import scoring_engine.web as web
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 SETUP_SCRIPT = os.path.join(REPO_ROOT, "bin", "setup")
 
+
+@pytest.fixture(autouse=True)
+def _ensure_scoring_engine_log_propagates():
+    """Keep the ``scoring_engine`` logger propagating so ``caplog`` can see it.
+
+    ``scoring_engine/engine/execute_command.py`` sets ``logger.propagate = False``
+    as a process-wide side effect (to suppress duplicate celery log lines). Under
+    pytest-xdist that leaks into whatever test runs next in the same worker, and
+    the caplog-based tests here only capture records that propagate to the root
+    handler -- so without this they fail depending on test distribution. Restore
+    the default for the duration of each test in this module.
+    """
+    logger = logging.getLogger("scoring_engine")
+    saved = logger.propagate
+    logger.propagate = True
+    try:
+        yield
+    finally:
+        logger.propagate = saved
+
+
 # Anything that looks like a generated key: a long unbroken run of hex.
 LOOKS_LIKE_A_KEY = re.compile(r"[0-9a-f]{32,}")
 
