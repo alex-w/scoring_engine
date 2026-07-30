@@ -1097,6 +1097,23 @@ def admin_get_teams():
         return {"status": "Unauthorized"}, 403
 
 
+@mod.route("/api/admin/get_hosts")
+@login_required
+def admin_get_hosts():
+    """Distinct service hosts across all teams, sorted ascending. White team only.
+
+    Gives organizers an inventory of every host in the competition (one row per
+    unique host, deduplicated across teams) without exposing per-team scoring
+    detail. Read-only, so it is not cached the same way the scoreboard is -- the
+    host list changes only when services are added/edited.
+    """
+    if current_user.is_white_team:
+        hosts = db.session.query(Service.host).distinct().order_by(Service.host).all()
+        return jsonify(data=[{"host": host} for (host,) in hosts])
+    else:
+        return {"status": "Unauthorized"}, 403
+
+
 @mod.route("/api/admin/update_password", methods=["POST"])
 @login_required
 def admin_update_password():
