@@ -3,13 +3,11 @@ import itertools
 import random
 from collections import defaultdict
 
-from sqlalchemy import Column, Integer, String, desc, func
+from sqlalchemy import Column, Integer, String, func
 from sqlalchemy.orm import relationship
 
 from scoring_engine.db import db
 from scoring_engine.models.base import Base
-from scoring_engine.models.check import Check
-
 
 # Curated palette: medium-saturation, medium-lightness colors that maintain
 # WCAG AA contrast (4.5:1) on both dark (#0a0a0a–#161616) and light
@@ -53,7 +51,6 @@ _TEAM_COLORS = [
 _palette_index = 0
 from scoring_engine.models.inject import Inject, InjectRubricScore
 from scoring_engine.models.round import Round
-from scoring_engine.models.service import Service
 
 
 def _get_rank_from_scores(scores, target_id, default=1):
@@ -114,22 +111,14 @@ class Team(Base):
     @property
     def current_score(self):
         """
-        Calculate current score from successful checks.
-        WARNING: This performs a DB query on each access. Consider caching results
-        or using bulk queries when accessing scores for multiple teams.
+        Current raw service score, read from the materialized round_score table
+        instead of re-summing the full check history on every access. Identical in
+        value to the old ``SUM(Service.points) JOIN checks WHERE result`` -- the
+        engine writes one round_score row per team per round at round close.
         """
-        score = (
-            db.session.query(func.sum(Service.points))
-            .select_from(Team)
-            .join(Service)
-            .join(Check)
-            .filter(Service.team_id == self.id)
-            .filter(Check.result.is_(True))
-            .scalar()
-        )
-        if not score:
-            return 0
-        return score
+        from scoring_engine.scores import team_service_score
+
+        return team_service_score(db.session, self.id)
 
     @property
     def current_inject_score(self):
@@ -152,25 +141,16 @@ class Team(Base):
     @property
     def place(self):
         """
-        Calculate team's current place/rank based on scores.
-        WARNING: This queries ALL teams and their scores on EVERY access!
-        This is very expensive - avoid calling in loops or templates.
-        For bulk operations, calculate ranks once and cache/pass the results.
-        See scoring_engine/web/views/api/overview.py for an efficient batch implementation.
+        Calculate team's current place/rank based on raw service scores, read from
+        the materialized round_score table (no full-history scan). Ranking is by raw
+        points, matching the historical behaviour of this property.
+        WARNING: still O(all teams) per access -- avoid calling in loops or
+        templates. For bulk operations calculate ranks once; see
+        scoring_engine/web/views/api/overview.py for a batch implementation.
         """
-        scores = (
-            db.session.query(
-                Service.team_id,
-                func.sum(Service.points).label("score"),
-            )
-            .join(Check)
-            .filter(Check.result.is_(True))
-            .group_by(Service.team_id)
-            .order_by(desc("score"))
-            .all()
-        )
+        from scoring_engine.scores import all_team_service_scores
 
-        # Scores are already sorted descending by the query
+        scores = sorted(all_team_service_scores(db.session).items(), key=lambda kv: kv[1], reverse=True)
         # Returns 1 if no scores or team not in list
         return _get_rank_from_scores(scores, self.id, default=1)
 
@@ -189,24 +169,88 @@ class Team(Base):
     # Adjectives and animals for anonymous team names
     # 50 adjectives × 30 animals = 1500 unique combinations
     _ADJECTIVES = [
-        "Swift", "Brave", "Mighty", "Silent", "Cunning",
-        "Bold", "Fierce", "Noble", "Stealthy", "Shadow",
-        "Iron", "Golden", "Crystal", "Storm", "Frost",
-        "Crimson", "Thunder", "Phantom", "Blazing", "Savage",
-        "Lunar", "Solar", "Cyber", "Primal", "Spectral",
-        "Ancient", "Emerald", "Sapphire", "Onyx", "Obsidian",
-        "Rapid", "Rogue", "Eternal", "Mystic", "Stealth",
-        "Elite", "Prime", "Alpha", "Omega", "Delta",
-        "Apex", "Neon", "Arctic", "Inferno", "Venom",
-        "Titan", "Dusk", "Tempest", "Wraith", "Chaos",
+        "Swift",
+        "Brave",
+        "Mighty",
+        "Silent",
+        "Cunning",
+        "Bold",
+        "Fierce",
+        "Noble",
+        "Stealthy",
+        "Shadow",
+        "Iron",
+        "Golden",
+        "Crystal",
+        "Storm",
+        "Frost",
+        "Crimson",
+        "Thunder",
+        "Phantom",
+        "Blazing",
+        "Savage",
+        "Lunar",
+        "Solar",
+        "Cyber",
+        "Primal",
+        "Spectral",
+        "Ancient",
+        "Emerald",
+        "Sapphire",
+        "Onyx",
+        "Obsidian",
+        "Rapid",
+        "Rogue",
+        "Eternal",
+        "Mystic",
+        "Stealth",
+        "Elite",
+        "Prime",
+        "Alpha",
+        "Omega",
+        "Delta",
+        "Apex",
+        "Neon",
+        "Arctic",
+        "Inferno",
+        "Venom",
+        "Titan",
+        "Dusk",
+        "Tempest",
+        "Wraith",
+        "Chaos",
     ]
     _ANIMALS = [
-        "Falcon", "Wolf", "Tiger", "Panther", "Eagle",
-        "Bear", "Lion", "Viper", "Phoenix", "Dragon",
-        "Hawk", "Cobra", "Raven", "Jaguar", "Shark",
-        "Lynx", "Scorpion", "Stallion", "Raptor", "Hydra",
-        "Griffin", "Serpent", "Kraken", "Mantis", "Barracuda",
-        "Wyvern", "Basilisk", "Chimera", "Sphinx", "Cerberus",
+        "Falcon",
+        "Wolf",
+        "Tiger",
+        "Panther",
+        "Eagle",
+        "Bear",
+        "Lion",
+        "Viper",
+        "Phoenix",
+        "Dragon",
+        "Hawk",
+        "Cobra",
+        "Raven",
+        "Jaguar",
+        "Shark",
+        "Lynx",
+        "Scorpion",
+        "Stallion",
+        "Raptor",
+        "Hydra",
+        "Griffin",
+        "Serpent",
+        "Kraken",
+        "Mantis",
+        "Barracuda",
+        "Wyvern",
+        "Basilisk",
+        "Chimera",
+        "Sphinx",
+        "Cerberus",
     ]
 
     @classmethod
@@ -262,50 +306,43 @@ class Team(Base):
         return mapping
 
     def get_array_of_scores(self, max_round):
-        round_scores = (
-            db.session.query(
-                Check.round_id,
-                func.sum(Service.points),
-            )
-            .join(Check)
-            .join(Round)
-            .filter(Service.team_id == self.id)
-            .filter(Check.result.is_(True))
-            .filter(Round.number <= max_round)
-            .group_by(Check.round_id)
+        """Cumulative raw service score at each round 0..max_round.
+
+        Reads per-round points from round_score, keyed on round_number. (The old
+        implementation grouped by round_id but filled the 0..max_round range with
+        round *numbers*, which only lined up when id == number; keying on
+        round_number is both correct and free of a full-history scan.)
+        """
+        from scoring_engine.models.round_score import RoundScore
+
+        rows = (
+            db.session.query(RoundScore.round_number, RoundScore.service_points)
+            .filter(RoundScore.team_id == self.id)
+            .filter(RoundScore.round_number <= max_round)
             .all()
         )
+        by_round = defaultdict(int)
+        for round_number, points in rows:
+            by_round[round_number] += points
 
-        # Create default dict with 0 as default round value
-        d = defaultdict(int)
-        for k, v in round_scores:
-            d[k] = v
-
-        # Loop over all rounds and add 0 if not present
-        # TODO - There has to be a better way to do this...
-        for i in range(0, max_round + 1):
-            d[i]
-
-        # Accumulate the scores for each round based on previous round
-        return list(itertools.accumulate([x[1] for x in sorted(d.items())]))
+        per_round = [by_round.get(i, 0) for i in range(0, max_round + 1)]
+        return list(itertools.accumulate(per_round))
 
     # TODO - Can this be deprecated, it only exists in tests
     def get_round_scores(self, round_num):
         if round_num == 0:
             return 0
 
+        from scoring_engine.models.round_score import RoundScore
+
         score = (
-            db.session.query(func.sum(Service.points))
-            .join(Check)
-            .join(Round)
-            .filter(Service.team_id == self.id)
-            .filter(Check.result.is_(True))
-            .filter(Round.number == round_num)
-            .group_by(Check.round_id)
+            db.session.query(func.coalesce(func.sum(RoundScore.service_points), 0))
+            .filter(RoundScore.team_id == self.id)
+            .filter(RoundScore.round_number == round_num)
             .scalar()
         )
 
-        return score if score else 0
+        return int(score) if score else 0
 
     @staticmethod
     def get_all_blue_teams():

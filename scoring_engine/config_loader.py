@@ -274,6 +274,42 @@ class ConfigLoader(object):
             "bool",
         )
 
+        # Red-team flag scoring: flat points per captured flag by permission level.
+        self.flag_points_user = self.parse_sources(
+            "flag_points_user",
+            int(self.parser["OPTIONS"].get("flag_points_user", "100")),
+            "int",
+        )
+        self.flag_points_root = self.parse_sources(
+            "flag_points_root",
+            int(self.parser["OPTIONS"].get("flag_points_root", "200")),
+            "int",
+        )
+
+        # Weighted scoring: rebalance how service uptime, injects, and flag
+        # captures contribute to the combined scoreboard total. Every weight is a
+        # multiplier (1.0 = no change); the whole feature is off unless enabled.
+        self.weighted_scoring_enabled = self.parse_sources(
+            "weighted_scoring_enabled",
+            self.parser["OPTIONS"].get("weighted_scoring_enabled", "false").lower() == "true",
+            "bool",
+        )
+        self.service_weight = self.parse_sources(
+            "service_weight",
+            float(self.parser["OPTIONS"].get("service_weight", "1.0")),
+            "float",
+        )
+        self.inject_weight = self.parse_sources(
+            "inject_weight",
+            float(self.parser["OPTIONS"].get("inject_weight", "1.0")),
+            "float",
+        )
+        self.flag_weight = self.parse_sources(
+            "flag_weight",
+            float(self.parser["OPTIONS"].get("flag_weight", "1.0")),
+            "float",
+        )
+
     def parse_sources(self, key_name, default_value, obj_type="str"):
         """Return a configuration value using environment overrides when present.
 

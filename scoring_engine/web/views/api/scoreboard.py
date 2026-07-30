@@ -1,5 +1,5 @@
 from collections import defaultdict
-from itertools import accumulate
+from datetime import datetime, timezone
 
 from flask import jsonify
 from flask_login import current_user
@@ -7,13 +7,11 @@ from sqlalchemy.sql import func
 
 from scoring_engine.cache import cache
 from scoring_engine.db import db
-from scoring_engine.models.check import Check
 from scoring_engine.models.inject import Inject, InjectRubricScore
 from scoring_engine.models.round import Round
-from scoring_engine.models.service import Service
 from scoring_engine.models.setting import Setting
 from scoring_engine.models.team import Team
-from scoring_engine.sla import apply_dynamic_scoring_to_round, calculate_team_total_penalties, get_sla_config
+from scoring_engine.sla import apply_dynamic_scoring_to_round, get_sla_config
 
 from . import mod
 
@@ -40,66 +38,50 @@ def get_anonymize_mode():
     return (True, False)
 
 
-def calculate_team_scores_with_dynamic_scoring(sla_config):
+def calculate_team_scores_with_dynamic_scoring(sla_config, freeze_time=None):
     """
     Calculate team scores with dynamic scoring multipliers applied per-round.
 
     Returns dict mapping team_id to total score with multipliers applied.
+
+    Reads from the materialized round_score table (see scoring_engine.scores)
+    rather than re-summing the full check history on every scoreboard render.
+    ``freeze_time`` restricts to rounds closed at/before the wall-clock freeze.
     """
-    if not sla_config.dynamic_enabled:
-        # No dynamic scoring - use simple sum
-        return dict(
-            db.session.query(Service.team_id, func.sum(Service.points))
-            .join(Check)
-            .filter(Check.result.is_(True))
-            .group_by(Service.team_id)
-            .all()
-        )
+    from scoring_engine.scores import team_service_scores
 
-    # Query scores grouped by team and round
-    round_scores = (
-        db.session.query(
-            Service.team_id,
-            Check.round_id,
-            func.sum(Service.points).label("round_score"),
-        )
-        .join(Check)
-        .filter(Check.result.is_(True))
-        .group_by(Service.team_id, Check.round_id)
-        .all()
-    )
-
-    # Get round numbers for each round_id
-    rounds = {r.id: r.number for r in db.session.query(Round.id, Round.number).all()}
-
-    # Calculate total with multipliers
-    team_scores = defaultdict(int)
-    for team_id, round_id, round_score in round_scores:
-        round_number = rounds.get(round_id, 0)
-        adjusted_score = apply_dynamic_scoring_to_round(round_number, round_score, sla_config)
-        team_scores[team_id] += adjusted_score
-
-    return dict(team_scores)
+    return team_service_scores(db.session, sla_config, freeze_time=freeze_time)
 
 
 @cache.memoize()
-def _get_bar_data_cached(anonymize, show_both):
+def _get_bar_data_cached(anonymize, show_both, frozen_view=False):
     """
     Internal cached function for bar chart data.
-    Cache key includes anonymize/show_both flags for separate caches per user type.
+    Cache key includes anonymize/show_both/frozen_view flags for separate caches
+    per user type (frozen_view distinguishes the white/live view from the frozen
+    public view, which anonymize/show_both alone do not when anonymization is off).
     """
+    from scoring_engine.scores import get_freeze_time, team_adjustment_totals, team_penalties
+
+    freeze_time = get_freeze_time() if frozen_view else None
+
     sla_config = get_sla_config()
-    current_scores = calculate_team_scores_with_dynamic_scoring(sla_config)
+    current_scores = calculate_team_scores_with_dynamic_scoring(sla_config, freeze_time=freeze_time)
+    adjustments = team_adjustment_totals(db.session, freeze_time=freeze_time)
+    # All teams' SLA penalties in a couple of grouped queries, rather than the
+    # per-service check scan calculate_team_total_penalties runs one team at a time.
+    penalties = team_penalties(db.session, sla_config) if sla_config.sla_enabled else {}
 
     inject_scores_visible = Setting.get_setting("inject_scores_visible")
     if inject_scores_visible and inject_scores_visible.value:
-        inject_scores = dict(
+        inject_query = (
             db.session.query(Inject.team_id, func.sum(InjectRubricScore.score))
             .join(InjectRubricScore)
             .filter(Inject.status == "Graded")
-            .group_by(Inject.team_id)
-            .all()
         )
+        if freeze_time is not None:
+            inject_query = inject_query.filter(Inject.graded <= freeze_time)
+        inject_scores = dict(inject_query.group_by(Inject.team_id).all())
     else:
         inject_scores = {}
 
@@ -108,9 +90,22 @@ def _get_bar_data_cached(anonymize, show_both):
     team_scores = []
     team_inject_scores = []
     team_sla_penalties = []
+    team_adjustments = []
     team_adjusted_scores = []
+    # Pre-weight values, kept alongside the weighted ones so the UI can show the
+    # breakdown (e.g. "120 service x 1.5"). Equal to the weighted values when
+    # weighted scoring is off.
+    team_raw_service_scores = []
+    team_raw_inject_scores = []
 
     team_colors = []
+
+    # Weighted scoring rebalances the categories that make up the combined total:
+    # service and inject are scaled by their weights before they are summed with
+    # manual adjustments. Adjustments are absolute point awards and are never
+    # weighted. Flag captures accrue to the red team only (see the flags API),
+    # so flag_weight does not enter the blue teams' totals here.
+    weighted = sla_config.weighted_scoring_enabled
 
     blue_teams = db.session.query(Team).filter(Team.color == "Blue").order_by(Team.id).all()
     team_name_map = Team.get_team_name_mapping(anonymize=anonymize, show_both=show_both)
@@ -121,14 +116,25 @@ def _get_bar_data_cached(anonymize, show_both):
         team_colors.append(blue_team.rgb_color)
         service_score = current_scores.get(blue_team.id, 0)
         inject_score = inject_scores.get(blue_team.id, 0)
-        team_scores.append(str(service_score))
-        team_inject_scores.append(str(inject_score))
+        adjustment = adjustments.get(blue_team.id, 0)
+
+        team_raw_service_scores.append(str(service_score))
+        team_raw_inject_scores.append(str(inject_score))
+        if weighted:
+            weighted_service = int(round(service_score * sla_config.service_weight))
+            weighted_inject = int(round(inject_score * sla_config.inject_weight))
+        else:
+            weighted_service = service_score
+            weighted_inject = inject_score
+        team_scores.append(str(weighted_service))
+        team_inject_scores.append(str(weighted_inject))
+        team_adjustments.append(str(adjustment))
 
         # Calculate SLA penalties if enabled
-        # Total base score includes both service and inject scores
-        total_base_score = service_score + inject_score
+        # Total base score includes (weighted) service, inject, and manual adjustments
+        total_base_score = weighted_service + weighted_inject + adjustment
         if sla_config.sla_enabled:
-            penalty = calculate_team_total_penalties(blue_team, sla_config)
+            penalty = penalties.get(blue_team.id, 0)
             team_sla_penalties.append(str(penalty))
             if sla_config.allow_negative:
                 adjusted = total_base_score - penalty
@@ -144,60 +150,105 @@ def _get_bar_data_cached(anonymize, show_both):
     team_data["service_scores"] = team_scores
     team_data["inject_scores"] = team_inject_scores
     team_data["sla_penalties"] = team_sla_penalties
+    team_data["adjustments"] = team_adjustments
     team_data["adjusted_scores"] = team_adjusted_scores
     team_data["sla_enabled"] = sla_config.sla_enabled
+    team_data["weighted_scoring_enabled"] = weighted
+    if weighted:
+        team_data["weights"] = {
+            "service": sla_config.service_weight,
+            "inject": sla_config.inject_weight,
+            "flag": sla_config.flag_weight,
+        }
+        team_data["raw_service_scores"] = team_raw_service_scores
+        team_data["raw_inject_scores"] = team_raw_inject_scores
     return team_data
 
 
+# Cap on the number of x-points in a line series. One point per round makes the
+# response grow without bound (~2.4 MB at 100 teams x 3000 rounds); this keeps it
+# flat regardless of competition length. A few hundred points is well past what a
+# line chart can resolve on screen.
+LINE_CHART_MAX_POINTS = 400
+
+
+def _downsample_indices(n, max_points):
+    """Evenly-spaced indices into ``range(n)``, at most ``max_points``, always
+    including the first and last. Returns every index when ``n <= max_points``.
+
+    Uniform sampling is enough here because the cumulative score series is smooth
+    and monotonic; it also gives every team the same x-points, which a shared
+    rounds axis requires.
+    """
+    if n <= max_points:
+        return list(range(n))
+    step = (n - 1) / (max_points - 1)
+    indices = sorted({round(i * step) for i in range(max_points)})
+    if indices[-1] != n - 1:
+        indices.append(n - 1)
+    return indices
+
+
 @cache.memoize()
-def _get_line_data_cached(anonymize, show_both):
+def _get_line_data_cached(anonymize, show_both, frozen_view=False):
     """
     Internal cached function for line chart data.
-    Cache key includes anonymize/show_both flags for separate caches per user type.
+    Cache key includes anonymize/show_both/frozen_view flags for separate caches
+    per user type.
     """
+    from scoring_engine.scores import get_freeze_time
+
+    freeze_time = get_freeze_time() if frozen_view else None
+
     last_round = Round.get_last_round_num()
     sla_config = get_sla_config()
-
-    team_data = {
-        "team": [],
-        "rounds": [f"Round {round}" for round in range(last_round + 1)],
-    }
 
     blue_teams = (
         db.session.query(Team.id, Team.name, Team.rgb_color).filter(Team.color == "Blue").order_by(Team.id).all()
     )
 
-    round_scores = (
-        db.session.query(
-            Service.team_id,
-            Check.round_id,
-            func.sum(Service.points),
-        )
-        .join(Check)
-        .filter(Check.result.is_(True))
-        .group_by(Service.team_id, Check.round_id)
-        .order_by(Service.team_id, Check.round_id)
-        .all()
-    )
+    # Per-team, per-round points from the materialized round_score table (no
+    # full-history scan, no round_id->number lookup -- the number is stored).
+    from scoring_engine.models.round_score import RoundScore
 
-    # Get round numbers for dynamic scoring
-    rounds_map = {r.id: r.number for r in db.session.query(Round.id, Round.number).all()}
+    round_query = db.session.query(RoundScore.team_id, RoundScore.round_number, RoundScore.service_points)
+    if freeze_time is not None:
+        round_query = round_query.join(Round, Round.id == RoundScore.round_id).filter(Round.round_end <= freeze_time)
+    round_scores = round_query.order_by(RoundScore.team_id, RoundScore.round_number).all()
 
     scores_dict = defaultdict(lambda: defaultdict(int))
-    for team_id, round_id, round_score in round_scores:
+    for team_id, round_number, round_score in round_scores:
         # Apply dynamic scoring multiplier if enabled
-        round_number = rounds_map.get(round_id, 0)
-        adjusted_score = apply_dynamic_scoring_to_round(round_number, round_score, sla_config)
-        scores_dict[team_id][round_id] = adjusted_score
+        scores_dict[team_id][round_number] = apply_dynamic_scoring_to_round(round_number, round_score, sla_config)
+
+    # x-axis is every round (0..last_round), downsampled to a bounded set of
+    # points shared by all teams.
+    n = last_round + 1
+    sampled = _downsample_indices(n, LINE_CHART_MAX_POINTS)
+
+    team_data = {
+        "team": [],
+        "rounds": [f"Round {i}" for i in sampled],
+    }
 
     team_name_map = Team.get_team_name_mapping(anonymize=anonymize, show_both=show_both)
 
     for team_id, team_name, rgb_color in blue_teams:
         display_name = team_name_map.get(team_id, team_name)
+        team_rounds = scores_dict[team_id]
+        # Cumulative score at each round. A round the team did not score in carries
+        # the previous total forward, so the series stays aligned to the rounds
+        # axis (accumulating only the scored rounds would drop points and shift the
+        # line left of where it belongs).
+        cumulative = []
+        running = 0
+        for r in range(n):
+            running += team_rounds.get(r, 0)
+            cumulative.append(running)
         team_data["team"].append(
             {
                 "name": display_name,
-                "scores": list(accumulate(scores_dict[team_id].values(), initial=0)),
+                "scores": [cumulative[i] for i in sampled],
                 "color": rgb_color,
             }
         )
@@ -205,15 +256,52 @@ def _get_line_data_cached(anonymize, show_both):
     return team_data
 
 
+@mod.route("/api/scoreboard/freeze_status")
+def scoreboard_freeze_status():
+    """Report whether the scoreboard is frozen, for the banner + countdown.
+
+    Returns the freeze instant and the current server time as epoch seconds so the
+    client can render a countdown that does not depend on the viewer's clock being
+    correct -- the whole point of a countdown across timezones. Public: the banner
+    shows to everyone; only the white team's data stays live (``white_live``).
+    """
+    import pytz
+
+    from scoring_engine.config import config
+    from scoring_engine.datetime_utils import ensure_utc_aware
+    from scoring_engine.scores import get_freeze_time
+
+    freeze_time = get_freeze_time()
+    if freeze_time is None:
+        return jsonify(frozen=False)
+
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
+    is_white = current_user.is_authenticated and current_user.is_white_team
+    display = ensure_utc_aware(freeze_time).astimezone(pytz.timezone(config.timezone)).strftime("%Y-%m-%d %H:%M:%S %Z")
+    return jsonify(
+        frozen=True,
+        white_live=is_white,
+        freeze_epoch=int(ensure_utc_aware(freeze_time).timestamp()),
+        server_epoch=int(ensure_utc_aware(now).timestamp()),
+        freeze_display=display,
+    )
+
+
 @mod.route("/api/scoreboard/get_bar_data")
 def scoreboard_get_bar_data():
-    """Get bar chart data. Cached separately by user type."""
+    """Get bar chart data. Cached separately by user type and freeze view."""
+    from . import get_effective_freeze
+
     anonymize, show_both = get_anonymize_mode()
-    return jsonify(_get_bar_data_cached(anonymize, show_both))
+    frozen_view, _ = get_effective_freeze()
+    return jsonify(_get_bar_data_cached(anonymize, show_both, frozen_view))
 
 
 @mod.route("/api/scoreboard/get_line_data")
 def scoreboard_get_line_data():
-    """Get line chart data. Cached separately by user type."""
+    """Get line chart data. Cached separately by user type and freeze view."""
+    from . import get_effective_freeze
+
     anonymize, show_both = get_anonymize_mode()
-    return jsonify(_get_line_data_cached(anonymize, show_both))
+    frozen_view, _ = get_effective_freeze()
+    return jsonify(_get_line_data_cached(anonymize, show_both, frozen_view))

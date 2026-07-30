@@ -9,6 +9,225 @@
 
 {% block admincontent %}
 <div class="pt-3">
+  <!-- Scoreboard Freeze -->
+  <h3 class="section-header">Scoreboard Freeze</h3>
+  <div class="chart-card">
+    <p class="text-muted">
+      Freeze the public scoreboard at a wall-clock time (competition timezone). Once
+      the freeze time passes, competitors see standings as of that instant while the
+      engine keeps scoring; the white team keeps seeing live scores. Clear the field
+      to unfreeze.
+    </p>
+    <div id="freeze-current" class="mb-2"></div>
+    <form id="freeze-form" role="form" class="row g-2 align-items-end">
+      <div class="col-auto">
+        <label class="form-label">Freeze at (competition local time)</label>
+        <input type="datetime-local" step="1" class="form-control" id="freeze-input">
+      </div>
+      <div class="col-auto">
+        <button type="submit" class="btn btn-primary">Set Freeze</button>
+        <button type="button" class="btn btn-outline-secondary" id="freeze-clear">Clear</button>
+      </div>
+      <div class="col-12"><div id="freeze-msg" class="small mt-1"></div></div>
+    </form>
+  </div>
+  <script>
+  $(function () {
+    function loadFreeze() {
+      $.getJSON('/api/scoreboard/freeze_status', function (d) {
+        if (d && d.frozen) {
+          $('#freeze-current').html('<span class="badge bg-warning text-dark">Freeze set</span> ' +
+            ScoringEngineUtils.escapeHtml(d.freeze_display));
+        } else {
+          $('#freeze-current').html('<span class="badge bg-success">Not frozen</span>');
+        }
+      });
+    }
+    function post(freezeTime) {
+      $('#freeze-msg').text('');
+      $.ajax({
+        url: '/api/admin/freeze', method: 'POST', contentType: 'application/json',
+        data: JSON.stringify({ freeze_time: freezeTime }),
+        success: function () { $('#freeze-msg').removeClass('text-danger').addClass('text-success').text('Saved.'); loadFreeze(); },
+        error: function (xhr) {
+          var m = 'Error'; try { m = xhr.responseJSON.message || m; } catch (e) {}
+          $('#freeze-msg').removeClass('text-success').addClass('text-danger').text(m);
+        }
+      });
+    }
+    $('#freeze-form').on('submit', function (e) { e.preventDefault(); post($('#freeze-input').val()); });
+    $('#freeze-clear').on('click', function () { $('#freeze-input').val(''); post(''); });
+    loadFreeze();
+  });
+  </script>
+
+  <!-- Competition Schedule (multi-day windows) -->
+  <h3 class="section-header">Competition Schedule</h3>
+  <div class="chart-card">
+    <p class="text-muted">
+      Define the windows during which the engine scores (competition timezone).
+      Outside every window the engine idles &mdash; no wasted checks between
+      competition days &mdash; and the public scoreboard freezes to the end of the
+      last completed window, while the white team keeps seeing live scores. With no
+      windows defined the engine runs continuously and only the manual freeze above
+      applies.
+    </p>
+    <div id="windows-list" class="mb-3"></div>
+    <form id="window-form" role="form" class="row g-2 align-items-end">
+      <div class="col-auto">
+        <label class="form-label">Label (optional)</label>
+        <input type="text" class="form-control" id="window-name" placeholder="Day 1">
+      </div>
+      <div class="col-auto">
+        <label class="form-label">Start (competition local time)</label>
+        <input type="datetime-local" step="1" class="form-control" id="window-start">
+      </div>
+      <div class="col-auto">
+        <label class="form-label">End (competition local time)</label>
+        <input type="datetime-local" step="1" class="form-control" id="window-end">
+      </div>
+      <div class="col-auto">
+        <button type="submit" class="btn btn-primary">Add Window</button>
+      </div>
+      <div class="col-12"><div id="window-msg" class="small mt-1"></div></div>
+    </form>
+  </div>
+  <script>
+  $(function () {
+    function renderWindows(windows) {
+      if (!windows || !windows.length) {
+        $('#windows-list').html('<span class="badge bg-secondary">No schedule</span> ' +
+          '<span class="text-muted small">Engine runs continuously.</span>');
+        return;
+      }
+      var rows = windows.map(function (w) {
+        var label = w.name ? ScoringEngineUtils.escapeHtml(w.name) + ': ' : '';
+        var badge = w.enabled ? '<span class="badge bg-success">enabled</span>'
+                              : '<span class="badge bg-secondary">disabled</span>';
+        return '<tr data-id="' + w.id + '">' +
+          '<td>' + label + ScoringEngineUtils.escapeHtml(w.start_display) + ' &rarr; ' +
+            ScoringEngineUtils.escapeHtml(w.end_display) + '</td>' +
+          '<td>' + badge + '</td>' +
+          '<td class="text-end">' +
+            '<button type="button" class="btn btn-sm btn-outline-secondary window-toggle">' +
+              (w.enabled ? 'Disable' : 'Enable') + '</button> ' +
+            '<button type="button" class="btn btn-sm btn-outline-danger window-delete">Delete</button>' +
+          '</td></tr>';
+      }).join('');
+      $('#windows-list').html('<table class="table table-sm align-middle mb-0"><tbody>' + rows + '</tbody></table>');
+    }
+    function loadWindows() {
+      $.getJSON('/api/admin/windows', function (d) { renderWindows(d.windows); });
+    }
+    function showMsg(text, ok) {
+      $('#window-msg').removeClass('text-danger text-success')
+        .addClass(ok ? 'text-success' : 'text-danger').text(text);
+    }
+    $('#window-form').on('submit', function (e) {
+      e.preventDefault();
+      $('#window-msg').text('');
+      $.ajax({
+        url: '/api/admin/windows', method: 'POST', contentType: 'application/json',
+        data: JSON.stringify({
+          name: $('#window-name').val(),
+          start_time: $('#window-start').val(),
+          end_time: $('#window-end').val()
+        }),
+        success: function () {
+          showMsg('Window added.', true);
+          $('#window-name,#window-start,#window-end').val('');
+          loadWindows();
+        },
+        error: function (xhr) {
+          var m = 'Error'; try { m = xhr.responseJSON.message || m; } catch (e) {}
+          showMsg(m, false);
+        }
+      });
+    });
+    $('#windows-list').on('click', '.window-delete', function () {
+      var id = $(this).closest('tr').data('id');
+      $.ajax({ url: '/api/admin/windows/' + id, method: 'DELETE',
+        success: loadWindows, error: function () { showMsg('Delete failed.', false); } });
+    });
+    $('#windows-list').on('click', '.window-toggle', function () {
+      var id = $(this).closest('tr').data('id');
+      $.ajax({ url: '/api/admin/windows/' + id, method: 'PATCH',
+        success: loadWindows, error: function () { showMsg('Update failed.', false); } });
+    });
+    loadWindows();
+  });
+  </script>
+
+  <!-- Weighted Scoring -->
+  <h3 class="section-header">Weighted Scoring</h3>
+  <div class="chart-card">
+    <p class="text-muted">
+      Rebalance how the categories combine into each team's scoreboard total. Each
+      weight multiplies that category's contribution (1.0 = unchanged) &mdash; use it
+      to dampen a category that dominates or lift one that should count for more.
+      Service and inject weights scale the blue teams' combined total; the flag
+      weight scales the red team's flag total. Manual adjustments are never weighted.
+    </p>
+    <div id="weighted-msg" class="small mb-2"></div>
+    <form id="weighted-form" role="form" class="row g-3 align-items-end">
+      <div class="col-12">
+        <div class="form-check">
+          <input class="form-check-input" type="checkbox" id="weighted-enabled">
+          <label class="form-check-label" for="weighted-enabled">Enable weighted scoring</label>
+        </div>
+      </div>
+      <div class="col-auto">
+        <label class="form-label">Service weight</label>
+        <input type="number" step="0.1" min="0" class="form-control" id="weight-service">
+      </div>
+      <div class="col-auto">
+        <label class="form-label">Inject weight</label>
+        <input type="number" step="0.1" min="0" class="form-control" id="weight-inject">
+      </div>
+      <div class="col-auto">
+        <label class="form-label">Flag weight (red)</label>
+        <input type="number" step="0.1" min="0" class="form-control" id="weight-flag">
+      </div>
+      <div class="col-auto">
+        <button type="submit" class="btn btn-primary">Save Weights</button>
+      </div>
+    </form>
+  </div>
+  <script>
+  $(function () {
+    function loadWeighted() {
+      $.getJSON('/api/admin/weighted_scoring', function (d) {
+        $('#weighted-enabled').prop('checked', !!d.enabled);
+        $('#weight-service').val(d.service_weight);
+        $('#weight-inject').val(d.inject_weight);
+        $('#weight-flag').val(d.flag_weight);
+      });
+    }
+    $('#weighted-form').on('submit', function (e) {
+      e.preventDefault();
+      $('#weighted-msg').text('');
+      $.ajax({
+        url: '/api/admin/weighted_scoring', method: 'POST', contentType: 'application/json',
+        data: JSON.stringify({
+          enabled: $('#weighted-enabled').is(':checked'),
+          service_weight: $('#weight-service').val(),
+          inject_weight: $('#weight-inject').val(),
+          flag_weight: $('#weight-flag').val()
+        }),
+        success: function () {
+          $('#weighted-msg').removeClass('text-danger').addClass('text-success').text('Saved.');
+          loadWeighted();
+        },
+        error: function (xhr) {
+          var m = 'Error'; try { m = xhr.responseJSON.message || m; } catch (e) {}
+          $('#weighted-msg').removeClass('text-success').addClass('text-danger').text(m);
+        }
+      });
+    });
+    loadWeighted();
+  });
+  </script>
+
   <!-- SLA Penalties Section -->
   <h3 class="section-header">SLA Penalty Configuration</h3>
   <div class="chart-card">

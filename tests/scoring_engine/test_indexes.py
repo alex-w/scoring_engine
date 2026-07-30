@@ -31,6 +31,15 @@ EXPECTED_INDEXES = {
     "ix_kb_name_round_num": ("kb", ["name", "round_num"]),
 }
 
+# Indexes on 003-managed tables added by LATER migrations (each with its own
+# migration + migration test). Registered here so the "no undeclared index"
+# guard and the create_all check treat them as legitimate, without implying they
+# belong to the 003 migration set (test_migration_declares_same_indexes below
+# stays scoped to EXPECTED_INDEXES).
+POST_003_INDEXES = {
+    "ix_checks_sla_scan": ("checks", ["service_id", "completed", "result", "round_id"]),  # migration 009
+}
+
 _MIGRATION_PATH = os.path.join(
     os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
     "alembic",
@@ -72,9 +81,24 @@ class TestModelIndexDeclarations:
         assert actual_columns == expected_columns
 
     def test_no_undeclared_extra_indexes(self):
-        """Guard against a stray index landing in the models without a migration."""
-        declared = set(self._metadata_indexes())
-        assert declared == set(EXPECTED_INDEXES)
+        """Guard against a stray index on a 003-managed table without a migration.
+
+        Scoped to the tables migration 003 owns. A later migration that adds a new
+        table with its own indexes (e.g. 005's round_score) is legitimate and must
+        not trip this guard -- it is validated by that migration's own test.
+        """
+        all_expected = {**EXPECTED_INDEXES, **POST_003_INDEXES}
+        managed_tables = {table for table, _cols in all_expected.values()}
+        declared = {
+            name for name, (table, _cols) in self._metadata_indexes().items() if table in managed_tables
+        }
+        assert declared == set(all_expected)
+
+    @pytest.mark.parametrize("index_name", sorted(POST_003_INDEXES))
+    def test_later_migration_index_declared_on_model(self, index_name):
+        declared = self._metadata_indexes()
+        assert index_name in declared, f"{index_name} is not declared in any model's __table_args__"
+        assert declared[index_name] == POST_003_INDEXES[index_name]
 
     def test_flag_solves_unique_constraint_still_present(self):
         """The new index is additive — the existing unique constraint stays."""
@@ -85,9 +109,9 @@ class TestModelIndexDeclarations:
 class TestIndexesExistInDatabase:
     """create_all() (used by bin/setup on fresh installs) must build them."""
 
-    @pytest.mark.parametrize("index_name", sorted(EXPECTED_INDEXES))
+    @pytest.mark.parametrize("index_name", sorted({**EXPECTED_INDEXES, **POST_003_INDEXES}))
     def test_index_created_by_create_all(self, index_name, db_session):
-        table_name, expected_columns = EXPECTED_INDEXES[index_name]
+        table_name, expected_columns = {**EXPECTED_INDEXES, **POST_003_INDEXES}[index_name]
         inspector = sa.inspect(db.engine)
         indexes = {i["name"]: i for i in inspector.get_indexes(table_name)}
         assert index_name in indexes, f"{index_name} missing from live {table_name} schema"
